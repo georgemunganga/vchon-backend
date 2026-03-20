@@ -6,7 +6,7 @@ FROM node:22-alpine AS builder
 # Install pnpm via corepack
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
-# Install openssl so Prisma can detect it
+# Install openssl so Prisma can detect it during build
 RUN apk add --no-cache openssl
 
 WORKDIR /app
@@ -35,8 +35,9 @@ FROM node:22-alpine AS runner
 
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
-# Install openssl for Prisma at runtime
-RUN apk add --no-cache openssl
+# Install openssl (Prisma runtime) + curl (healthcheck)
+# Alpine's built-in BusyBox wget does not support -qO- reliably
+RUN apk add --no-cache openssl curl
 
 WORKDIR /app
 
@@ -56,9 +57,9 @@ COPY --from=builder /app/node_modules/.pnpm ./node_modules/.pnpm
 # Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD wget -qO- http://localhost:8000/health || exit 1
+# Health check — use curl (reliable on Alpine, unlike BusyBox wget)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fs http://localhost:8000/health || exit 1
 
 # Start server
 CMD ["node", "dist/server.js"]
