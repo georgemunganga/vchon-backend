@@ -24,13 +24,13 @@ npx prisma db push
 pnpm dev
 ```
 
-The server starts on **port 8001** by default.
+The server starts on **port 8000** by default.
 
 ## Connecting the Frontend
 
 In the frontend `.env` or wherever `API` is defined, change:
 ```
-REACT_APP_BACKEND_URL=http://localhost:8001
+REACT_APP_BACKEND_URL=http://localhost:8000
 ```
 No other frontend changes are needed — all API contracts are identical.
 

@@ -9,7 +9,7 @@ import attendanceRoutes from './routes/attendance'
 import adminRoutes from './routes/admin'
 import superuserRoutes from './routes/superuser'
 
-const PORT = parseInt(process.env.PORT || '8001', 10)
+const PORT = parseInt(process.env.PORT || '8000', 10)
 const HOST = process.env.HOST || '0.0.0.0'
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:3000').split(',')
 

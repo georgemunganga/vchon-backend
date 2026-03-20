@@ -54,11 +54,11 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules/.pnpm ./node_modules/.pnpm
 
 # Expose port
-EXPOSE 8001
+EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD wget -qO- http://localhost:8001/health || exit 1
+  CMD wget -qO- http://localhost:8000/health || exit 1
 
 # Start server
 CMD ["node", "dist/server.js"]
