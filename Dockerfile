@@ -35,8 +35,7 @@ FROM node:22-alpine AS runner
 
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
-# Install openssl (Prisma runtime) + curl (healthcheck)
-# Alpine's built-in BusyBox wget does not support -qO- reliably
+# Install openssl (Prisma runtime) + curl (available for manual checks)
 RUN apk add --no-cache openssl curl
 
 WORKDIR /app
@@ -54,12 +53,12 @@ COPY --from=builder /app/dist ./dist
 # Copy the full pnpm store (includes generated Prisma client binaries)
 COPY --from=builder /app/node_modules/.pnpm ./node_modules/.pnpm
 
-# Expose port
+# Expose the port the server listens on (Coolify reads this)
+# The actual port is controlled by the PORT env var set in Coolify
 EXPOSE 8000
 
-# Health check — use curl (reliable on Alpine, unlike BusyBox wget)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fs http://localhost:8000/health || exit 1
+# No HEALTHCHECK here — Coolify manages healthchecks via its own UI
+# to avoid hardcoded port conflicts when Coolify injects a different PORT env var
 
 # Start server
 CMD ["node", "dist/server.js"]
