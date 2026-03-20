@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment secrets — NEVER commit these
+.env
+
+# Prisma generated client (regenerated via prisma generate)
+# Keep schema.prisma but ignore generated binaries
+node_modules/.prisma/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp

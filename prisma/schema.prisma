@@ -1,0 +1,126 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                    Int           @id @default(autoincrement())
+  user_id               String        @unique
+  email                 String        @unique
+  password              String?
+  name                  String
+  phone_number          String?
+  position              String?
+  province              String?
+  district              String?
+  facility              String?
+  area_of_allocation    String?
+  picture               String?
+  role                  String        @default("user")
+  assigned_scope        Json?
+  assigned_jurisdiction Json?
+  assigned_shift        String?
+  custom_shift_start    String?
+  custom_shift_end      String?
+  created_at            DateTime      @default(now())
+
+  sessions              UserSession[]
+  attendance            Attendance[]
+
+  @@index([role])
+  @@index([facility])
+  @@index([district])
+}
+
+model UserSession {
+  id            Int      @id @default(autoincrement())
+  session_token String   @unique
+  user_id       String
+  expires_at    DateTime
+  created_at    DateTime @default(now())
+
+  user          User     @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([expires_at])
+}
+
+model Facility {
+  id          Int      @id @default(autoincrement())
+  facility_id String   @unique
+  name        String
+  district    String
+  province    String
+  latitude    Float?
+  longitude   Float?
+  created_at  DateTime @default(now())
+
+  @@unique([name, district])
+  @@index([district])
+  @@index([province])
+}
+
+model Attendance {
+  id                 Int      @id @default(autoincrement())
+  attendance_id      String   @unique
+  offline_id         String?  @unique
+  user_id            String
+  user_name          String
+  position           String
+  facility           String
+  area_of_allocation String?
+  action             String
+  timestamp          DateTime
+  latitude           Float?
+  longitude          Float?
+  shift_type         String?
+  synced             Boolean  @default(true)
+
+  user               User     @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([facility])
+  @@index([timestamp])
+  @@index([user_id, timestamp(sort: Desc)])
+}
+
+model Notification {
+  id              Int      @id @default(autoincrement())
+  notification_id String   @unique
+  type            String
+  user_id         String
+  user_name       String
+  facility        String
+  message         String
+  distance_meters Int?
+  latitude        Float?
+  longitude       Float?
+  timestamp       DateTime
+  read            Boolean  @default(false)
+  attendance_id   String?
+
+  @@index([facility])
+  @@index([read])
+  @@index([timestamp])
+}
+
+model ShiftConfig {
+  id                   Int      @id @default(autoincrement())
+  config_id            String   @unique @default("default")
+  morning_start        String   @default("06:00")
+  morning_end          String   @default("14:00")
+  afternoon_start      String   @default("14:00")
+  afternoon_end        String   @default("22:00")
+  night_start          String   @default("22:00")
+  night_end            String   @default("06:00")
+  four_off_start       String   @default("07:00")
+  four_off_end         String   @default("19:00")
+  on_call_start        String   @default("00:00")
+  on_call_end          String   @default("23:59")
+  grace_period_minutes Int      @default(15)
+  updated_at           DateTime @updatedAt
+}
