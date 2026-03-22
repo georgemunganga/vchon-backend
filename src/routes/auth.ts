@@ -27,6 +27,7 @@ import {
   hashPassword, verifyPassword, createJwtToken, COOKIE_OPTIONS
 } from '../lib/auth'
 import { authenticate } from '../plugins/authenticate'
+import { sendOtpEmail } from '../lib/mailer'
 
 const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID     || ''
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || ''
@@ -37,48 +38,6 @@ const FRONTEND_URL         = process.env.FRONTEND_URL         || 'http://localho
 
 function generateOtp(): string {
   return Math.floor(100000 + Math.random() * 900000).toString()
-}
-
-async function sendOtpEmail(email: string, code: string, name: string, purpose: 'registration' | 'login' = 'registration'): Promise<void> {
-  const resendKey = process.env.RESEND_API_KEY
-  if (!resendKey) {
-    console.log(`[OTP] ${purpose.toUpperCase()} code ${code} for ${email} (RESEND_API_KEY not set)`)
-    return
-  }
-  const subject = purpose === 'login' ? 'Your VChron Login Code' : 'Your VChron Verification Code'
-  const heading = purpose === 'login' ? 'Sign in to VChron' : 'Verify your VChron account'
-  try {
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${resendKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: 'VChron <noreply@vcron.cloud>',
-        to: [email],
-        subject,
-        html: `
-          <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
-            <h2 style="color: #0f766e;">${heading}</h2>
-            <p>Hi ${name},</p>
-            <p>Your one-time code is:</p>
-            <div style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #0f766e; padding: 16px; background: #f0fdf4; border-radius: 8px; text-align: center; margin: 16px 0;">
-              ${code}
-            </div>
-            <p style="color: #6b7280;">This code expires in 10 minutes. Do not share it with anyone.</p>
-            <p style="color: #6b7280; font-size: 12px;">If you did not request this, please ignore this email.</p>
-          </div>
-        `,
-      }),
-    })
-    if (!res.ok) {
-      const err = await res.json()
-      console.error('[OTP] Resend error:', err)
-    }
-  } catch (e) {
-    console.error('[OTP] Failed to send email:', e)
-  }
 }
 
 // ─── User Response Helper ─────────────────────────────────────────────────────
