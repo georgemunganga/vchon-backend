@@ -1,19 +1,80 @@
+/**
+ * VChron Auth Routes
+ *
+ * Registration Wizard (3 steps):
+ *   POST /api/auth/register/step1  — Validate credentials, send OTP
+ *   POST /api/auth/register/step2  — Verify OTP, create unverified user
+ *   POST /api/auth/register/step3  — Complete profile setup
+ *
+ * Standard Auth:
+ *   POST /api/auth/login
+ *   POST /api/auth/logout
+ *   GET  /api/auth/me
+ *   GET  /api/auth/google
+ *   GET  /api/auth/google/callback
+ *   POST /api/auth/complete-registration  (Google OAuth users)
+ */
+
 import { FastifyInstance } from 'fastify'
 import { v4 as uuidv4 } from 'uuid'
 import prisma from '../lib/prisma'
 import {
   hashPassword, verifyPassword, createJwtToken, COOKIE_OPTIONS
 } from '../lib/auth'
-import {
-  PROVINCES, DISTRICTS, FACILITIES_BY_DISTRICT, POSITIONS
-} from '../lib/constants'
 import { authenticate } from '../plugins/authenticate'
 
-// ─── Google OAuth config (set via env vars) ───────────────────────────────────
 const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID     || ''
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || ''
 const GOOGLE_REDIRECT_URI  = process.env.GOOGLE_REDIRECT_URI  || ''
 const FRONTEND_URL         = process.env.FRONTEND_URL         || 'http://localhost:3000'
+
+// ─── OTP Helpers ─────────────────────────────────────────────────────────────
+
+function generateOtp(): string {
+  return Math.floor(100000 + Math.random() * 900000).toString()
+}
+
+async function sendOtpEmail(email: string, code: string, name: string): Promise<void> {
+  const resendKey = process.env.RESEND_API_KEY
+  if (!resendKey) {
+    console.log(`[OTP] Would send code ${code} to ${email} (RESEND_API_KEY not set)`)
+    return
+  }
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${resendKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: 'VChron <noreply@vcron.cloud>',
+        to: [email],
+        subject: 'Your VChron Verification Code',
+        html: `
+          <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
+            <h2 style="color: #0f766e;">Verify your VChron account</h2>
+            <p>Hi ${name},</p>
+            <p>Your verification code is:</p>
+            <div style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #0f766e; padding: 16px; background: #f0fdf4; border-radius: 8px; text-align: center; margin: 16px 0;">
+              ${code}
+            </div>
+            <p style="color: #6b7280;">This code expires in 10 minutes. Do not share it with anyone.</p>
+            <p style="color: #6b7280; font-size: 12px;">If you did not request this, please ignore this email.</p>
+          </div>
+        `,
+      }),
+    })
+    if (!res.ok) {
+      const err = await res.json()
+      console.error('[OTP] Resend error:', err)
+    }
+  } catch (e) {
+    console.error('[OTP] Failed to send email:', e)
+  }
+}
+
+// ─── User Response Helper ─────────────────────────────────────────────────────
 
 function userResponse(u: any) {
   return {
@@ -30,50 +91,191 @@ function userResponse(u: any) {
     role:               u.role               ?? 'user',
     assigned_scope:     u.assigned_scope     ?? null,
     assigned_shift:     u.assigned_shift     ?? null,
+    is_verified:        u.is_verified        ?? false,
+    setup_complete:     u.setup_complete     ?? false,
+    ministry_id:        u.ministry_id        ?? null,
+    org_unit_id:        u.org_unit_id        ?? null,
     created_at:         u.created_at?.toISOString() ?? null,
   }
 }
 
+// ─── Routes ──────────────────────────────────────────────────────────────────
+
 export default async function authRoutes(fastify: FastifyInstance) {
 
-  // ─── POST /api/auth/register ────────────────────────────────────────────────
-  fastify.post('/auth/register', async (request, reply) => {
-    const body = request.body as any
-    const { email, password, name, phone_number, position, province, district, facility } = body
+  // ─── STEP 1: Validate credentials, send OTP ──────────────────────────────────
+  fastify.post('/auth/register/step1', async (request, reply) => {
+    const { name, email, phone_number, password } = request.body as any
 
-    if (!email || !password || !name || !phone_number || !position || !province || !district || !facility) {
-      return reply.code(400).send({ detail: 'All fields are required' })
+    if (!name || !email || !phone_number || !password) {
+      return reply.code(400).send({ detail: 'Name, email, phone number, and password are required' })
     }
 
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    if (!emailRegex.test(email)) {
+      return reply.code(400).send({ detail: 'Invalid email address' })
+    }
+
+    // Validate password strength
+    if (password.length < 8) {
+      return reply.code(400).send({ detail: 'Password must be at least 8 characters' })
+    }
+
+    // Check if email already registered and verified
     const existing = await prisma.user.findUnique({ where: { email } })
-    if (existing) return reply.code(400).send({ detail: 'Email already registered' })
+    if (existing && existing.is_verified) {
+      return reply.code(400).send({ detail: 'Email already registered' })
+    }
 
-    const provinceNames = PROVINCES.map((p) => p.name)
-    if (!provinceNames.includes(province)) return reply.code(400).send({ detail: 'Invalid province' })
+    // Generate OTP
+    const code = generateOtp()
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
 
-    const hardcodedDistricts = DISTRICTS[province] || []
-    const dbFacsDistricts = await prisma.facility.findMany({ where: { province }, select: { district: true } })
-    const allDistricts = new Set([...hardcodedDistricts, ...dbFacsDistricts.map((f) => f.district)])
-    if (!allDistricts.has(district)) return reply.code(400).send({ detail: 'Invalid district for selected province' })
-
-    const hardcodedFacilities = FACILITIES_BY_DISTRICT[district] || []
-    const dbFacs = await prisma.facility.findMany({ where: { district }, select: { name: true } })
-    const allFacilities = new Set([...hardcodedFacilities, ...dbFacs.map((f) => f.name)])
-    if (!allFacilities.has(facility)) return reply.code(400).send({ detail: 'Invalid facility for selected district' })
-
-    if (!POSITIONS.includes(position)) return reply.code(400).send({ detail: 'Invalid position' })
-
-    const userId = `user_${uuidv4().replace(/-/g, '').slice(0, 12)}`
-    const user = await prisma.user.create({
-      data: { user_id: userId, email, password: hashPassword(password), name, phone_number, position, province, district, facility, role: 'user' },
+    // Invalidate any existing OTPs for this email
+    await prisma.otpCode.updateMany({
+      where: { identifier: email, purpose: 'registration', used: false },
+      data: { used: true },
     })
 
-    const token = createJwtToken(userId)
-    reply.setCookie('session_token', token, COOKIE_OPTIONS)
-    return reply.send({ access_token: token, token_type: 'bearer', user: userResponse(user) })
+    // Save new OTP
+    await prisma.otpCode.create({
+      data: { identifier: email, code, purpose: 'registration', expires_at: expiresAt },
+    })
+
+    // Send OTP email
+    await sendOtpEmail(email, code, name)
+
+    // Store pending registration data temporarily (we'll use it in step2)
+    // We use a temp OTP record with metadata stored in a separate pending record
+    // For simplicity, we store the hashed password in a temp user record
+    if (existing && !existing.is_verified) {
+      // Update the unverified user's pending data
+      await prisma.user.update({
+        where: { email },
+        data: { name, phone_number, password: hashPassword(password) },
+      })
+    } else {
+      // Create a placeholder unverified user
+      const userId = `user_${uuidv4().replace(/-/g, '').slice(0, 12)}`
+      await prisma.user.create({
+        data: {
+          user_id: userId,
+          email,
+          name,
+          phone_number,
+          password: hashPassword(password),
+          role: 'user',
+          is_verified: false,
+          setup_complete: false,
+        },
+      })
+    }
+
+    return reply.send({
+      message: 'OTP sent successfully',
+      identifier: email,
+      // In development, return the code for testing (remove in production)
+      ...(process.env.NODE_ENV === 'development' ? { debug_otp: code } : {}),
+    })
   })
 
-  // ─── POST /api/auth/login ───────────────────────────────────────────────────
+  // ─── STEP 2: Verify OTP ───────────────────────────────────────────────────────
+  fastify.post('/auth/register/step2', async (request, reply) => {
+    const { email, code } = request.body as any
+
+    if (!email || !code) {
+      return reply.code(400).send({ detail: 'Email and OTP code are required' })
+    }
+
+    // Find the most recent unused OTP for this email
+    const otp = await prisma.otpCode.findFirst({
+      where: {
+        identifier: email,
+        purpose: 'registration',
+        used: false,
+        expires_at: { gt: new Date() },
+      },
+      orderBy: { created_at: 'desc' },
+    })
+
+    if (!otp) {
+      return reply.code(400).send({ detail: 'Invalid or expired OTP. Please request a new code.' })
+    }
+
+    if (otp.code !== code) {
+      return reply.code(400).send({ detail: 'Incorrect OTP code' })
+    }
+
+    // Mark OTP as used
+    await prisma.otpCode.update({ where: { id: otp.id }, data: { used: true } })
+
+    // Mark user as verified
+    const user = await prisma.user.update({
+      where: { email },
+      data: { is_verified: true },
+    })
+
+    // Issue a temporary setup token (short-lived)
+    const setupToken = createJwtToken(user.user_id)
+
+    return reply.send({
+      message: 'Email verified successfully',
+      setup_token: setupToken,
+      user_id: user.user_id,
+    })
+  })
+
+  // ─── STEP 3: Complete profile setup ──────────────────────────────────────────
+  fastify.post('/auth/register/step3', { preHandler: authenticate }, async (request, reply) => {
+    const { ministry_id, org_unit_id, position, province_id, district_id } = request.body as any
+
+    if (!ministry_id || !org_unit_id || !position) {
+      return reply.code(400).send({ detail: 'Ministry, organisation unit, and position are required' })
+    }
+
+    // Validate ministry exists
+    const ministry = await prisma.ministry.findUnique({ where: { id: parseInt(ministry_id) } })
+    if (!ministry) return reply.code(400).send({ detail: 'Invalid ministry' })
+
+    // Validate org unit exists and belongs to the ministry
+    const orgUnit = await prisma.orgUnit.findFirst({
+      where: { id: parseInt(org_unit_id), ministry_id: parseInt(ministry_id) },
+      include: {
+        district: { include: { province: true } },
+      },
+    })
+    if (!orgUnit) return reply.code(400).send({ detail: 'Invalid organisation unit for selected ministry' })
+
+    const userId = (request as any).user.user_id
+
+    // Update user with complete profile
+    const updated = await prisma.user.update({
+      where: { user_id: userId },
+      data: {
+        ministry_id: parseInt(ministry_id),
+        org_unit_id: parseInt(org_unit_id),
+        position,
+        // Also populate legacy flat fields for backward compatibility
+        province: orgUnit.district.province.name,
+        district: orgUnit.district.name,
+        facility: orgUnit.name,
+        setup_complete: true,
+      },
+    })
+
+    // Issue full auth token
+    const token = createJwtToken(userId)
+    reply.setCookie('session_token', token, COOKIE_OPTIONS)
+
+    return reply.send({
+      access_token: token,
+      token_type: 'bearer',
+      user: userResponse(updated),
+    })
+  })
+
+  // ─── POST /api/auth/login ─────────────────────────────────────────────────────
   fastify.post('/auth/login', async (request, reply) => {
     const { email, password } = request.body as any
     if (!email || !password) return reply.code(400).send({ detail: 'Email and password required' })
@@ -83,18 +285,21 @@ export default async function authRoutes(fastify: FastifyInstance) {
     if (!user.password) return reply.code(401).send({ detail: 'Please use Google sign-in for this account' })
     if (!verifyPassword(password, user.password)) return reply.code(401).send({ detail: 'Invalid email or password' })
 
+    // If user is not verified, block login and prompt them to verify
+    if (!user.is_verified) {
+      return reply.code(403).send({ detail: 'Account not verified. Please complete registration.' })
+    }
+
     const token = createJwtToken(user.user_id)
     reply.setCookie('session_token', token, COOKIE_OPTIONS)
     return reply.send({ access_token: token, token_type: 'bearer', user: userResponse(user) })
   })
 
-  // ─── GET /api/auth/google  ──────────────────────────────────────────────────
-  // Step 1: Redirect browser to Google's OAuth consent screen
+  // ─── GET /api/auth/google ─────────────────────────────────────────────────────
   fastify.get('/auth/google', async (request, reply) => {
     if (!GOOGLE_CLIENT_ID || !GOOGLE_REDIRECT_URI) {
-      return reply.code(500).send({ detail: 'Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_REDIRECT_URI env vars.' })
+      return reply.code(500).send({ detail: 'Google OAuth not configured.' })
     }
-
     const params = new URLSearchParams({
       client_id:     GOOGLE_CLIENT_ID,
       redirect_uri:  GOOGLE_REDIRECT_URI,
@@ -103,20 +308,16 @@ export default async function authRoutes(fastify: FastifyInstance) {
       access_type:   'offline',
       prompt:        'select_account',
     })
-
     return reply.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`)
   })
 
-  // ─── GET /api/auth/google/callback ─────────────────────────────────────────
-  // Step 2: Google redirects here with ?code=...  Exchange code → tokens → user
+  // ─── GET /api/auth/google/callback ───────────────────────────────────────────
   fastify.get('/auth/google/callback', async (request, reply) => {
     const { code, error } = request.query as any
-
     if (error || !code) {
       return reply.redirect(`${FRONTEND_URL}/login?error=google_auth_failed`)
     }
 
-    // Exchange authorization code for access token
     let tokenRes: any
     try {
       const res = await fetch('https://oauth2.googleapis.com/token', {
@@ -132,15 +333,12 @@ export default async function authRoutes(fastify: FastifyInstance) {
       })
       tokenRes = await res.json()
       if (!res.ok || tokenRes.error) {
-        fastify.log.error({ tokenRes }, 'Google token exchange failed')
         return reply.redirect(`${FRONTEND_URL}/login?error=google_token_failed`)
       }
     } catch (e) {
-      fastify.log.error(e, 'Google token exchange error')
       return reply.redirect(`${FRONTEND_URL}/login?error=google_auth_error`)
     }
 
-    // Fetch user profile from Google
     let profile: any
     try {
       const res = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
@@ -149,24 +347,29 @@ export default async function authRoutes(fastify: FastifyInstance) {
       profile = await res.json()
       if (!profile.email) throw new Error('No email in profile')
     } catch (e) {
-      fastify.log.error(e, 'Google userinfo fetch failed')
       return reply.redirect(`${FRONTEND_URL}/login?error=google_profile_failed`)
     }
 
     const { email, name, picture } = profile
 
-    // Upsert user in database
     let user = await prisma.user.findUnique({ where: { email } })
     if (user) {
       user = await prisma.user.update({ where: { email }, data: { name, picture } })
     } else {
       const userId = `user_${uuidv4().replace(/-/g, '').slice(0, 12)}`
       user = await prisma.user.create({
-        data: { user_id: userId, email, name, picture, role: 'user' },
+        data: {
+          user_id: userId,
+          email,
+          name,
+          picture,
+          role: 'user',
+          is_verified: true, // Google accounts are pre-verified
+          setup_complete: false,
+        },
       })
     }
 
-    // Create session
     const sessionToken = createJwtToken(user.user_id)
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
     await prisma.userSession.upsert({
@@ -177,49 +380,52 @@ export default async function authRoutes(fastify: FastifyInstance) {
 
     reply.setCookie('session_token', sessionToken, { ...COOKIE_OPTIONS, maxAge: 7 * 24 * 60 * 60 })
 
-    // Redirect to frontend — complete registration if new user
-    const needsRegistration = !user.position || !user.facility
-    const destination = needsRegistration ? '/complete-registration' : '/dashboard'
-    return reply.redirect(`${FRONTEND_URL}${destination}`)
+    const needsSetup = !user.setup_complete
+    const destination = needsSetup ? '/register?step=3' : '/dashboard'
+    return reply.redirect(`${FRONTEND_URL}${destination}?token=${encodeURIComponent(sessionToken)}`)
   })
 
-  // ─── GET /api/auth/me ───────────────────────────────────────────────────────
+  // ─── GET /api/auth/me ─────────────────────────────────────────────────────────
   fastify.get('/auth/me', { preHandler: authenticate }, async (request, reply) => {
     return reply.send(userResponse((request as any).user))
   })
 
-  // ─── POST /api/auth/complete-registration ──────────────────────────────────
+  // ─── POST /api/auth/complete-registration (Google OAuth users) ────────────────
   fastify.post('/auth/complete-registration', { preHandler: authenticate }, async (request, reply) => {
-    const { phone_number, position, province, district, facility } = request.body as any
-    if (!phone_number || !position || !province || !district || !facility) {
-      return reply.code(400).send({ detail: 'All fields are required' })
+    const { phone_number, ministry_id, org_unit_id, position } = request.body as any
+
+    if (!ministry_id || !org_unit_id || !position) {
+      return reply.code(400).send({ detail: 'Ministry, organisation unit, and position are required' })
     }
 
-    const provinceNames = PROVINCES.map((p) => p.name)
-    if (!provinceNames.includes(province)) return reply.code(400).send({ detail: 'Invalid province' })
+    const ministry = await prisma.ministry.findUnique({ where: { id: parseInt(ministry_id) } })
+    if (!ministry) return reply.code(400).send({ detail: 'Invalid ministry' })
 
-    const hardcodedDistricts = DISTRICTS[province] || []
-    const dbFacsDistricts = await prisma.facility.findMany({ where: { province }, select: { district: true } })
-    const allDistricts = new Set([...hardcodedDistricts, ...dbFacsDistricts.map((f) => f.district)])
-    if (!allDistricts.has(district)) return reply.code(400).send({ detail: 'Invalid district for selected province' })
-
-    const hardcodedFacilities = FACILITIES_BY_DISTRICT[district] || []
-    const dbFacs = await prisma.facility.findMany({ where: { district }, select: { name: true } })
-    const allFacilities = new Set([...hardcodedFacilities, ...dbFacs.map((f) => f.name)])
-    if (!allFacilities.has(facility)) return reply.code(400).send({ detail: 'Invalid facility for selected district' })
-
-    if (!POSITIONS.includes(position)) return reply.code(400).send({ detail: 'Invalid position' })
+    const orgUnit = await prisma.orgUnit.findFirst({
+      where: { id: parseInt(org_unit_id), ministry_id: parseInt(ministry_id) },
+      include: { district: { include: { province: true } } },
+    })
+    if (!orgUnit) return reply.code(400).send({ detail: 'Invalid organisation unit' })
 
     const userId = (request as any).user.user_id
     const updated = await prisma.user.update({
       where: { user_id: userId },
-      data: { phone_number, position, province, district, facility },
+      data: {
+        phone_number: phone_number || undefined,
+        ministry_id: parseInt(ministry_id),
+        org_unit_id: parseInt(org_unit_id),
+        position,
+        province: orgUnit.district.province.name,
+        district: orgUnit.district.name,
+        facility: orgUnit.name,
+        setup_complete: true,
+      },
     })
 
     return reply.send(userResponse(updated))
   })
 
-  // ─── POST /api/auth/logout ──────────────────────────────────────────────────
+  // ─── POST /api/auth/logout ────────────────────────────────────────────────────
   fastify.post('/auth/logout', async (request, reply) => {
     const token = (request.cookies as any)?.session_token
     if (token) {

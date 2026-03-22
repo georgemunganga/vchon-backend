@@ -5,6 +5,10 @@
  *   - admin      → jurisdiction-scoped access (province/district/facility)
  *   - user       → regular healthcare worker
  *
+ * NOTE: Run seed-geography.ts FIRST before this script.
+ *   pnpm seed:geo   (geography, ministries, positions)
+ *   pnpm seed       (demo users)
+ *
  * Run: pnpm seed
  */
 
@@ -15,7 +19,6 @@ import * as dotenv from 'dotenv'
 
 dotenv.config()
 
-// Use direct DB URL for seeding (not Accelerate) to avoid caching issues
 const prisma = new PrismaClient({
   datasources: { db: { url: process.env.DATABASE_URL } },
 })
@@ -25,7 +28,19 @@ function hash(password: string): string {
 }
 
 async function main() {
-  console.log('🌱  Starting VChron seed...\n')
+  console.log('🌱  Starting VChron user seed...\n')
+
+  // ─── Resolve relational IDs ────────────────────────────────────────────────
+  const healthMinistry = await prisma.ministry.findUnique({ where: { name: 'Ministry of Health' } })
+  if (!healthMinistry) {
+    throw new Error('Ministry of Health not found. Run seed:geo first.')
+  }
+
+  // Helper: resolve OrgUnit ID by name
+  async function resolveOrgUnit(name: string): Promise<number | null> {
+    const unit = await prisma.orgUnit.findFirst({ where: { name } })
+    return unit?.id ?? null
+  }
 
   // ─── 1. Shift Config (default) ────────────────────────────────────────────
   await prisma.shiftConfig.upsert({
@@ -44,11 +59,13 @@ async function main() {
       on_call_start: '00:00',
       on_call_end: '23:59',
       grace_period_minutes: 15,
+      lunch_duration_mins: 60,
     },
   })
   console.log('✅  ShiftConfig (default) upserted')
 
   // ─── 2. Super User ────────────────────────────────────────────────────────
+  const uthId = await resolveOrgUnit('University Teaching Hospital')
   const superUser = await prisma.user.upsert({
     where: { email: 'superuser@vchron.demo' },
     update: { password: hash('SuperDemo@2026') },
@@ -65,11 +82,16 @@ async function main() {
       area_of_allocation: 'Administration',
       role: 'superuser',
       assigned_shift: 'morning',
+      is_verified: true,
+      setup_complete: true,
+      ministry_id: healthMinistry.id,
+      org_unit_id: uthId,
     },
   })
   console.log(`✅  Superuser:  ${superUser.email}  (role: ${superUser.role})`)
 
   // ─── 3. Admin User ────────────────────────────────────────────────────────
+  const kabweHospitalId = await resolveOrgUnit('Kabwe General Hospital')
   const adminUser = await prisma.user.upsert({
     where: { email: 'admin@vchron.demo' },
     update: { password: hash('AdminDemo@2026') },
@@ -86,7 +108,10 @@ async function main() {
       area_of_allocation: 'Ward A',
       role: 'admin',
       assigned_shift: 'morning',
-      // Scoped to Central Province → Kabwe district
+      is_verified: true,
+      setup_complete: true,
+      ministry_id: healthMinistry.id,
+      org_unit_id: kabweHospitalId,
       assigned_scope: {
         province: 'Central Province',
         district: 'Kabwe',
@@ -113,6 +138,7 @@ async function main() {
       facility: 'Kabwe General Hospital',
       area_of_allocation: 'Ward A',
       assigned_shift: 'morning',
+      org_unit_name: 'Kabwe General Hospital',
     },
     {
       email: 'doctor.demo@vchron.demo',
@@ -125,6 +151,7 @@ async function main() {
       facility: 'Mkushi District Hospital',
       area_of_allocation: 'Outpatient',
       assigned_shift: 'afternoon',
+      org_unit_name: 'Mkushi District Hospital',
     },
     {
       email: 'chw.demo@vchron.demo',
@@ -137,10 +164,12 @@ async function main() {
       facility: 'Serenje District Hospital',
       area_of_allocation: 'Community',
       assigned_shift: 'on_call',
+      org_unit_name: 'Serenje District Hospital',
     },
   ]
 
   for (const w of workers) {
+    const orgUnitId = await resolveOrgUnit(w.org_unit_name)
     const u = await prisma.user.upsert({
       where: { email: w.email },
       update: { password: hash(w.password) },
@@ -157,6 +186,10 @@ async function main() {
         area_of_allocation: w.area_of_allocation,
         role: 'user',
         assigned_shift: w.assigned_shift,
+        is_verified: true,
+        setup_complete: true,
+        ministry_id: healthMinistry.id,
+        org_unit_id: orgUnitId,
       },
     })
     console.log(`✅  Worker:     ${u.email}  (role: ${u.role})`)

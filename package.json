@@ -10,7 +10,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "seed": "ts-node-dev --transpile-only prisma/seed.ts"
+    "seed": "ts-node-dev --transpile-only prisma/seed.ts",
+    "seed:geo": "ts-node-dev --transpile-only prisma/seed-geography.ts"
   },
   "prisma": {
     "seed": "ts-node-dev --transpile-only prisma/seed.ts"
