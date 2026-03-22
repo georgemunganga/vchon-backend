@@ -5,10 +5,23 @@ import { requireAdmin } from '../plugins/authenticate'
 import { getAdminScopeWhere } from '../lib/adminScope'
 import { auditLog, AUDIT_ACTIONS, actorFromRequest } from '../lib/audit'
 
+// Format a duration in total SECONDS to hh:mm:ss
+function formatDuration(totalSeconds: number): string {
+  const h = Math.floor(totalSeconds / 3600)
+  const m = Math.floor((totalSeconds % 3600) / 60)
+  const s = totalSeconds % 60
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+// Legacy minutes-only formatter (kept for export compat)
 function formatLateDisplay(totalMinutes: number): string {
-  const hours = Math.floor(totalMinutes / 60)
-  const mins = totalMinutes % 60
-  return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
+  return formatDuration(totalMinutes * 60)
+}
+
+// Parse a HH:MM time string to total minutes since midnight
+function parseTimeToMinutes(t: string): number {
+  const [h, m] = t.split(':').map(Number)
+  return h * 60 + m
 }
 
 export default async function adminRoutes(fastify: FastifyInstance) {
@@ -26,20 +39,69 @@ export default async function adminRoutes(fastify: FastifyInstance) {
       take: 200,
     })
 
+    const config = await prisma.shiftConfig.findUnique({ where: { config_id: 'default' } })
+
     return reply.send({
-      attendance: records.map((r) => ({
-        attendance_id: r.attendance_id,
-        user_id: r.user_id,
-        user_name: r.user_name,
-        position: r.position,
-        facility: r.facility,
-        area_of_allocation: r.area_of_allocation,
-        action: r.action,
-        timestamp: r.timestamp.toISOString(),
-        shift_type: r.shift_type,
-        latitude: r.latitude,
-        longitude: r.longitude,
-      })),
+      attendance: records.map((r) => {
+        let lateSeconds: number | null = null
+        let earlySeconds: number | null = null
+        let status: 'on_time' | 'late' | 'early' | null = null
+
+        if (config && r.shift_type) {
+          const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
+          const recordSecs = r.timestamp.getHours() * 3600 + r.timestamp.getMinutes() * 60 + r.timestamp.getSeconds()
+
+          if (r.action === 'login') {
+            const shiftStartStr = (config as any)[`${r.shift_type}_start`]
+            if (shiftStartStr) {
+              const shiftStartMins = parseTimeToMinutes(shiftStartStr)
+              const grace = config.grace_period_minutes || 15
+              const shiftStartSecs = shiftStartMins * 60
+              const graceSecs = grace * 60
+              const diffSecs = recordSecs - (shiftStartSecs + graceSecs)
+              if (diffSecs > 0) {
+                lateSeconds = diffSecs
+                status = 'late'
+              } else {
+                status = 'on_time'
+              }
+            }
+          }
+
+          if (r.action === 'logout') {
+            const shiftEndStr = (config as any)[`${r.shift_type}_end`]
+            if (shiftEndStr) {
+              const shiftEndMins = parseTimeToMinutes(shiftEndStr)
+              const shiftEndSecs = shiftEndMins * 60
+              const diffSecs = shiftEndSecs - recordSecs
+              if (diffSecs > 0) {
+                earlySeconds = diffSecs
+                status = 'early'
+              } else {
+                status = 'on_time'
+              }
+            }
+          }
+        }
+
+        return {
+          attendance_id: r.attendance_id,
+          user_id: r.user_id,
+          user_name: r.user_name,
+          position: r.position,
+          facility: r.facility,
+          area_of_allocation: r.area_of_allocation,
+          action: r.action,
+          timestamp: r.timestamp.toISOString(),
+          shift_type: r.shift_type,
+          latitude: r.latitude,
+          longitude: r.longitude,
+          // Lateness / earliness in hh:mm:ss
+          late_display: lateSeconds !== null ? formatDuration(lateSeconds) : null,
+          early_display: earlySeconds !== null ? formatDuration(earlySeconds) : null,
+          status,
+        }
+      }),
     })
   })
 

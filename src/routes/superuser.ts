@@ -7,10 +7,15 @@ import { hashPassword } from '../lib/auth'
 import { PROVINCES, DISTRICTS, FACILITIES_BY_DISTRICT } from '../lib/constants'
 import { auditLog, AUDIT_ACTIONS, actorFromRequest } from '../lib/audit'
 
+function formatDuration(totalSeconds: number): string {
+  const h = Math.floor(totalSeconds / 3600)
+  const m = Math.floor((totalSeconds % 3600) / 60)
+  const s = totalSeconds % 60
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
 function formatLateDisplay(totalMinutes: number): string {
-  const hours = Math.floor(totalMinutes / 60)
-  const mins = totalMinutes % 60
-  return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
+  return formatDuration(totalMinutes * 60)
 }
 
 function parseTimeToMinutes(timeStr: string): number {
@@ -461,6 +466,206 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
       total,
       page: parseInt(page),
       limit: parseInt(limit),
+    })
+  })
+
+  // ─── GET /api/superuser/analytics ────────────────────────────────────────────
+  // Returns attendance analytics with period, province/district/user filters.
+  // Calculates early / on-time / late counts and percentages.
+  fastify.get('/superuser/analytics', { preHandler: requireSuperuser }, async (request, reply) => {
+    const query = request.query as any
+    const { period, date_from, date_to, province, district, facility, user_id } = query
+
+    // ── Date range ──────────────────────────────────────────────────────────
+    const now = new Date()
+    let start: Date
+    let end: Date = new Date(now)
+    end.setHours(23, 59, 59, 999)
+
+    if (period === 'daily') {
+      start = new Date(now); start.setHours(0, 0, 0, 0)
+    } else if (period === 'weekly') {
+      start = new Date(now)
+      start.setDate(now.getDate() - now.getDay()) // Sunday
+      start.setHours(0, 0, 0, 0)
+    } else if (period === 'monthly') {
+      start = new Date(now.getFullYear(), now.getMonth(), 1)
+    } else if (date_from && date_to) {
+      start = new Date(date_from); start.setHours(0, 0, 0, 0)
+      end   = new Date(date_to);   end.setHours(23, 59, 59, 999)
+    } else {
+      // Default: today
+      start = new Date(now); start.setHours(0, 0, 0, 0)
+    }
+
+    // ── Attendance filter ───────────────────────────────────────────────────
+    const where: any = { timestamp: { gte: start, lte: end }, action: 'login' }
+    if (user_id)  where.user_id  = user_id
+    if (facility) where.facility = facility
+    else if (district) {
+      const hardcoded = FACILITIES_BY_DISTRICT[district] || []
+      const dbFacs = await prisma.facility.findMany({ where: { district }, select: { name: true } })
+      const all = [...new Set([...hardcoded, ...dbFacs.map((f) => f.name)])]
+      if (all.length) where.facility = { in: all }
+    } else if (province) {
+      const dists = DISTRICTS[province] || []
+      let allFacs: string[] = []
+      for (const d of dists) allFacs = allFacs.concat(FACILITIES_BY_DISTRICT[d] || [])
+      const dbFacs = await prisma.facility.findMany({ where: { province }, select: { name: true } })
+      allFacs = [...new Set([...allFacs, ...dbFacs.map((f) => f.name)])]
+      if (allFacs.length) where.facility = { in: allFacs }
+    }
+
+    const config = await prisma.shiftConfig.findUnique({ where: { config_id: 'default' } })
+    const records = await prisma.attendance.findMany({ where, orderBy: { timestamp: 'asc' } })
+
+    // ── Categorise each login record ────────────────────────────────────────
+    let earlyCount = 0, onTimeCount = 0, lateCount = 0, unknownCount = 0
+    const lateDetails: any[] = []
+
+    for (const r of records) {
+      if (!config || !r.shift_type) { unknownCount++; continue }
+      const shiftStartStr = (config as any)[`${r.shift_type}_start`]
+      if (!shiftStartStr) { unknownCount++; continue }
+
+      const shiftStartMins = parseTimeToMinutes(shiftStartStr)
+      const grace = config.grace_period_minutes || 15
+      const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
+      const recordSecs = r.timestamp.getHours() * 3600 + r.timestamp.getMinutes() * 60 + r.timestamp.getSeconds()
+      const shiftStartSecs = shiftStartMins * 60
+      const graceSecs = grace * 60
+
+      if (recordMins < shiftStartMins) {
+        earlyCount++
+      } else if (recordSecs <= shiftStartSecs + graceSecs) {
+        onTimeCount++
+      } else {
+        lateCount++
+        const diffSecs = recordSecs - (shiftStartSecs + graceSecs)
+        lateDetails.push({
+          user_id: r.user_id,
+          user_name: r.user_name,
+          facility: r.facility,
+          shift_type: r.shift_type,
+          timestamp: r.timestamp.toISOString(),
+          late_by: formatDuration(diffSecs),
+          late_seconds: diffSecs,
+        })
+      }
+    }
+
+    const total = records.length
+    const pct = (n: number) => total > 0 ? Math.round((n / total) * 100) : 0
+
+    // ── Daily breakdown for chart ───────────────────────────────────────────
+    const dayMap: Record<string, { early: number; on_time: number; late: number }> = {}
+    for (const r of records) {
+      const day = r.timestamp.toISOString().split('T')[0]
+      if (!dayMap[day]) dayMap[day] = { early: 0, on_time: 0, late: 0 }
+      if (!config || !r.shift_type) continue
+      const shiftStartStr = (config as any)[`${r.shift_type}_start`]
+      if (!shiftStartStr) continue
+      const shiftStartMins = parseTimeToMinutes(shiftStartStr)
+      const grace = config.grace_period_minutes || 15
+      const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
+      const recordSecs = r.timestamp.getHours() * 3600 + r.timestamp.getMinutes() * 60 + r.timestamp.getSeconds()
+      const shiftStartSecs = shiftStartMins * 60
+      const graceSecs = grace * 60
+      if (recordMins < shiftStartMins) dayMap[day].early++
+      else if (recordSecs <= shiftStartSecs + graceSecs) dayMap[day].on_time++
+      else dayMap[day].late++
+    }
+
+    const daily_breakdown = Object.entries(dayMap)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, counts]) => ({ date, ...counts }))
+
+    return reply.send({
+      period: period || 'daily',
+      date_from: start.toISOString(),
+      date_to: end.toISOString(),
+      total_logins: total,
+      early: { count: earlyCount, percent: pct(earlyCount) },
+      on_time: { count: onTimeCount, percent: pct(onTimeCount) },
+      late: { count: lateCount, percent: pct(lateCount) },
+      unknown: { count: unknownCount, percent: pct(unknownCount) },
+      late_details: lateDetails.slice(0, 100),
+      daily_breakdown,
+    })
+  })
+
+  // ─── PUT /api/superuser/admins/:adminId/scope ─────────────────────────────
+  // Assign or update an admin's ministry + geographic scope.
+  // Scope shape: { ministry_id?, type: 'province'|'district'|'facility', value: string }
+  fastify.put('/superuser/admins/:adminId/scope', { preHandler: requireSuperuser }, async (request, reply) => {
+    const { adminId } = request.params as any
+    const body = request.body as any
+    const { ministry_id, scope_type, scope_value } = body
+
+    if (!scope_type || !['province', 'district', 'facility', 'national'].includes(scope_type)) {
+      return reply.code(400).send({ detail: 'scope_type must be province, district, facility, or national' })
+    }
+
+    const admin = await prisma.user.findUnique({ where: { user_id: adminId } })
+    if (!admin) return reply.code(404).send({ detail: 'Admin not found' })
+    if (!['admin', 'superuser'].includes(admin.role)) {
+      return reply.code(400).send({ detail: 'User is not an admin' })
+    }
+
+    const newJurisdiction = scope_type === 'national'
+      ? { type: 'national', value: 'all' }
+      : { type: scope_type, value: scope_value }
+
+    const updated = await prisma.user.update({
+      where: { user_id: adminId },
+      data: {
+        assigned_jurisdiction: newJurisdiction,
+        ministry_id: ministry_id ?? undefined,
+      },
+    })
+
+    await auditLog({
+      actor: actorFromRequest(request),
+      action: AUDIT_ACTIONS.UPDATE_ADMIN_SCOPE,
+      targetType: 'User',
+      targetId: adminId,
+      metadata: { ministry_id, scope_type, scope_value, admin_name: admin.name },
+    })
+
+    return reply.send({
+      user_id: updated.user_id,
+      name: updated.name,
+      assigned_jurisdiction: updated.assigned_jurisdiction,
+      ministry_id: updated.ministry_id,
+    })
+  })
+
+  // ─── GET /api/superuser/admins ────────────────────────────────────────────
+  // List all admin users with their current scope and ministry assignment.
+  fastify.get('/superuser/admins', { preHandler: requireSuperuser }, async (_req, reply) => {
+    const admins = await prisma.user.findMany({
+      where: { role: { in: ['admin', 'superuser'] } },
+      orderBy: { created_at: 'desc' },
+    })
+
+    // Fetch active ministries for the response
+    const ministries = await (prisma as any).ministry.findMany({
+      where: { is_active: true },
+      select: { id: true, name: true, unit_term: true },
+    }).catch(() => [])
+
+    return reply.send({
+      admins: admins.map((u: any) => ({
+        user_id: u.user_id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        ministry_id: u.ministry_id,
+        ministry_name: ministries.find((m: any) => m.id === u.ministry_id)?.name || null,
+        assigned_jurisdiction: u.assigned_jurisdiction,
+        created_at: u.created_at?.toISOString(),
+      })),
+      ministries,
     })
   })
 }
