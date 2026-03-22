@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { v4 as uuidv4 } from 'uuid'
 import ExcelJS from 'exceljs'
 import prisma from '../lib/prisma'
-import { requireSuperuser } from '../plugins/authenticate'
+import { requireSuperuser, requireAdmin } from '../plugins/authenticate'
 import { hashPassword } from '../lib/auth'
 import { PROVINCES, DISTRICTS, FACILITIES_BY_DISTRICT } from '../lib/constants'
 import { auditLog, AUDIT_ACTIONS, actorFromRequest } from '../lib/audit'
@@ -640,7 +640,187 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
     })
   })
 
-  // ─── GET /api/superuser/admins ────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
+  // MINISTRY CRUD (Superuser only)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // GET /api/superuser/ministries
+  fastify.get('/superuser/ministries', { preHandler: requireSuperuser }, async (_req, reply) => {
+    const ministries = await prisma.ministry.findMany({
+      orderBy: { name: 'asc' },
+      select: { id: true, name: true, unit_term: true, is_active: true, created_at: true },
+    })
+    return reply.send({ ministries })
+  })
+
+  // POST /api/superuser/ministries
+  fastify.post('/superuser/ministries', { preHandler: requireSuperuser }, async (request, reply) => {
+    const { name, unit_term = 'Facility', is_active = false } = request.body as any
+    if (!name) return reply.code(400).send({ detail: 'Ministry name is required' })
+    const existing = await prisma.ministry.findFirst({ where: { name: { equals: name, mode: 'insensitive' } } })
+    if (existing) return reply.code(409).send({ detail: 'A ministry with this name already exists' })
+    const ministry = await prisma.ministry.create({
+      data: { name: name.trim(), unit_term: unit_term.trim(), is_active },
+    })
+    await auditLog({ actor: actorFromRequest(request), action: 'CREATE_MINISTRY', targetType: 'Ministry', targetId: String(ministry.id), metadata: { name: ministry.name } })
+    return reply.code(201).send({ ministry })
+  })
+
+  // PATCH /api/superuser/ministries/:id
+  fastify.patch('/superuser/ministries/:id', { preHandler: requireSuperuser }, async (request, reply) => {
+    const { id } = request.params as any
+    const { name, unit_term } = request.body as any
+    const data: any = {}
+    if (name !== undefined) data.name = name.trim()
+    if (unit_term !== undefined) data.unit_term = unit_term.trim()
+    if (!Object.keys(data).length) return reply.code(400).send({ detail: 'Nothing to update' })
+    const ministry = await prisma.ministry.update({ where: { id: parseInt(id) }, data })
+    return reply.send({ ministry })
+  })
+
+  // PATCH /api/superuser/ministries/:id/activate
+  fastify.patch('/superuser/ministries/:id/activate', { preHandler: requireSuperuser }, async (request, reply) => {
+    const { id } = request.params as any
+    const ministry = await prisma.ministry.update({ where: { id: parseInt(id) }, data: { is_active: true } })
+    await auditLog({ actor: actorFromRequest(request), action: 'ACTIVATE_MINISTRY', targetType: 'Ministry', targetId: String(ministry.id), metadata: { name: ministry.name } })
+    return reply.send({ ministry })
+  })
+
+  // PATCH /api/superuser/ministries/:id/deactivate
+  fastify.patch('/superuser/ministries/:id/deactivate', { preHandler: requireSuperuser }, async (request, reply) => {
+    const { id } = request.params as any
+    const ministry = await prisma.ministry.update({ where: { id: parseInt(id) }, data: { is_active: false } })
+    await auditLog({ actor: actorFromRequest(request), action: 'DEACTIVATE_MINISTRY', targetType: 'Ministry', targetId: String(ministry.id), metadata: { name: ministry.name } })
+    return reply.send({ ministry })
+  })
+
+  // DELETE /api/superuser/ministries/:id
+  fastify.delete('/superuser/ministries/:id', { preHandler: requireSuperuser }, async (request, reply) => {
+    const { id } = request.params as any
+    const ministry = await prisma.ministry.findUnique({ where: { id: parseInt(id) } })
+    if (!ministry) return reply.code(404).send({ detail: 'Ministry not found' })
+    await prisma.ministry.delete({ where: { id: parseInt(id) } })
+    await auditLog({ actor: actorFromRequest(request), action: 'DELETE_MINISTRY', targetType: 'Ministry', targetId: String(id), metadata: { name: ministry.name } })
+    return reply.send({ message: 'Ministry deleted' })
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // ORG STRUCTURE TREE
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // GET /api/superuser/org-tree?ministry_id=X  — full province→district→facility→users tree
+  fastify.get('/superuser/org-tree', { preHandler: requireSuperuser }, async (request, reply) => {
+    const { ministry_id } = request.query as { ministry_id?: string }
+    const orgWhere: any = ministry_id ? { ministry_id: parseInt(ministry_id) } : {}
+
+    const [provinces, districts, orgUnits, users] = await Promise.all([
+      prisma.province.findMany({ orderBy: { name: 'asc' } }),
+      prisma.district.findMany({ orderBy: { name: 'asc' } }),
+      prisma.orgUnit.findMany({ where: orgWhere, orderBy: { name: 'asc' } }),
+      prisma.user.findMany({
+        where: { role: 'user', setup_complete: true },
+        select: { user_id: true, name: true, position: true, org_unit_id: true, assigned_shift: true },
+      }),
+    ])
+
+    const tree = provinces.map((prov: any) => {
+      const provDistricts = districts
+        .filter((d: any) => d.province_id === prov.id)
+        .map((dist: any) => {
+          const distUnits = orgUnits
+            .filter((u: any) => u.district_id === dist.id)
+            .map((unit: any) => ({
+              id: unit.id, name: unit.name, type: unit.type,
+              users: users.filter((u: any) => u.org_unit_id === unit.id)
+                .map((u: any) => ({ user_id: u.user_id, name: u.name, position: u.position, assigned_shift: u.assigned_shift })),
+            }))
+          return {
+            id: dist.id, name: dist.name, org_units: distUnits,
+            user_count: distUnits.reduce((s: number, u: any) => s + u.users.length, 0),
+          }
+        })
+      return {
+        id: prov.id, name: prov.name, districts: provDistricts,
+        user_count: provDistricts.reduce((s: number, d: any) => s + d.user_count, 0),
+      }
+    })
+
+    return reply.send({ tree })
+  })
+
+   // GET /api/admin/org-tree — admin sees their scoped tree (filtered by assigned_jurisdiction)
+  fastify.get('/admin/org-tree', { preHandler: requireAdmin }, async (request, reply) => {
+    const user = (request as any).user
+    const jurisdiction = user.assigned_jurisdiction as { type: string; value: string } | null
+
+    // Build province/district filters based on admin's jurisdiction scope
+    let provinceWhere: any = {}
+    let districtWhere: any = {}
+    let orgUnitWhere: any = {}
+
+    if (jurisdiction) {
+      if (jurisdiction.type === 'province') {
+        const prov = await prisma.province.findFirst({ where: { name: { contains: jurisdiction.value, mode: 'insensitive' } } })
+        if (prov) {
+          provinceWhere = { id: prov.id }
+          districtWhere = { province_id: prov.id }
+        }
+      } else if (jurisdiction.type === 'district') {
+        const dist = await prisma.district.findFirst({ where: { name: { contains: jurisdiction.value, mode: 'insensitive' } } })
+        if (dist) {
+          districtWhere = { id: dist.id }
+          orgUnitWhere = { district_id: dist.id }
+          // Get province for this district
+          const prov = await prisma.province.findUnique({ where: { id: dist.province_id } })
+          if (prov) provinceWhere = { id: prov.id }
+        }
+      } else if (jurisdiction.type === 'facility') {
+        const unit = await prisma.orgUnit.findFirst({ where: { name: { contains: jurisdiction.value, mode: 'insensitive' } } })
+        if (unit) {
+          orgUnitWhere = { id: unit.id }
+          const dist = await prisma.district.findUnique({ where: { id: unit.district_id } })
+          if (dist) {
+            districtWhere = { id: dist.id }
+            const prov = await prisma.province.findUnique({ where: { id: dist.province_id } })
+            if (prov) provinceWhere = { id: prov.id }
+          }
+        }
+      }
+    }
+
+    const [provinces, districts, orgUnits, users] = await Promise.all([
+      prisma.province.findMany({ where: provinceWhere, orderBy: { name: 'asc' } }),
+      prisma.district.findMany({ where: districtWhere, orderBy: { name: 'asc' } }),
+      prisma.orgUnit.findMany({ where: orgUnitWhere, orderBy: { name: 'asc' } }),
+      prisma.user.findMany({
+        where: { role: 'user' },
+        select: { user_id: true, name: true, position: true, org_unit_id: true, assigned_shift: true },
+      }),
+    ])
+    const tree = provinces.map((prov: any) => {
+      const provDistricts = districts
+        .filter((d: any) => d.province_id === prov.id)
+        .map((dist: any) => {
+          const distUnits = orgUnits
+            .filter((u: any) => u.district_id === dist.id)
+            .map((unit: any) => ({
+              id: unit.id, name: unit.name, type: unit.type,
+              users: users.filter((u: any) => u.org_unit_id === unit.id)
+                .map((u: any) => ({ user_id: u.user_id, name: u.name, position: u.position, assigned_shift: u.assigned_shift })),
+            }))
+          return {
+            id: dist.id, name: dist.name, org_units: distUnits,
+            user_count: distUnits.reduce((s: number, u: any) => s + u.users.length, 0),
+          }
+        })
+      return {
+        id: prov.id, name: prov.name, districts: provDistricts,
+        user_count: provDistricts.reduce((s: number, d: any) => s + d.user_count, 0),
+      }
+    })
+    return reply.send({ tree })
+  })
+  // ─── GET /api/superuser/admins────────────────────────────────────────────
   // List all admin users with their current scope and ministry assignment.
   fastify.get('/superuser/admins', { preHandler: requireSuperuser }, async (_req, reply) => {
     const admins = await prisma.user.findMany({

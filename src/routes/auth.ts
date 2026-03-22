@@ -92,6 +92,14 @@ export default async function authRoutes(fastify: FastifyInstance) {
       return reply.code(400).send({ detail: 'An account with this email already exists. Please sign in.' })
     }
 
+    // Block if phone number is already taken by a different verified account
+    const phoneOwner = await prisma.user.findFirst({
+      where: { phone_number, is_verified: true },
+    })
+    if (phoneOwner && phoneOwner.email !== email) {
+      return reply.code(400).send({ detail: 'This phone number is already registered to another account. Please use a different phone number.' })
+    }
+
     const code = generateOtp()
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000)
 
