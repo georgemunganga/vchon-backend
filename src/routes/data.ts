@@ -97,10 +97,12 @@ export default async function dataRoutes(fastify: FastifyInstance) {
     return reply.send({ positions })
   })
 
-  // ─── LEGACY: /data/areas ──────────────────────────────────────────────────────
-  fastify.get('/data/areas', async (_req, reply) => {
+  // ─── Areas of allocation — both /areas and /data/areas work ────────────────────
+  const areasHandler = async (_req: any, reply: any) => {
     return reply.send({ areas: ['Facility', 'Outreach'] })
-  })
+  }
+  fastify.get('/areas', areasHandler)
+  fastify.get('/data/areas', areasHandler)
 
   // ─── LEGACY: /data/facilities (flat list from OrgUnits) ──────────────────────
   fastify.get('/data/facilities', async (_req, reply) => {
