@@ -153,12 +153,10 @@ export default async function userRoutes(fastify: FastifyInstance) {
 
     // Audit log
     await auditLog({
-      actor_id:    actor.user_id,
-      actor_name:  actor.name,
-      actor_role:  actor.role,
-      action:      'APPROVE_DELETION',
-      target_type: 'User',
-      target_id:   request.user_id,
+      actor:      { user_id: actor.user_id, name: actor.name, role: actor.role },
+      action:     'APPROVE_DELETION',
+      targetType: 'User',
+      targetId:   request.user_id,
       metadata: {
         user_name:  request.user_name,
         user_email: request.user_email,
@@ -208,12 +206,10 @@ export default async function userRoutes(fastify: FastifyInstance) {
 
     // Audit log
     await auditLog({
-      actor_id:    actor.user_id,
-      actor_name:  actor.name,
-      actor_role:  actor.role,
-      action:      'REJECT_DELETION',
-      target_type: 'User',
-      target_id:   request.user_id,
+      actor:      { user_id: actor.user_id, name: actor.name, role: actor.role },
+      action:     'REJECT_DELETION',
+      targetType: 'User',
+      targetId:   request.user_id,
       metadata: {
         user_name:        request.user_name,
         rejection_reason: rejection_reason || null,

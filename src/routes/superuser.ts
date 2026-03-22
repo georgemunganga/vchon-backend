@@ -178,7 +178,7 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
     const allDistricts: string[] = []
     for (const dists of Object.values(DISTRICTS)) allDistricts.push(...dists)
     const dbFacs = await prisma.facility.findMany({ select: { district: true } })
-    const merged = [...new Set([...allDistricts, ...dbFacs.map((f) => f.district)])].sort()
+    const merged = [...new Set([...allDistricts, ...dbFacs.map((f: { district: string }) => f.district)])].sort()
     return reply.send({ districts: merged })
   })
 
@@ -222,14 +222,14 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
     else if (district) {
       const hardcoded = FACILITIES_BY_DISTRICT[district] || []
       const dbFacs = await prisma.facility.findMany({ where: { district }, select: { name: true } })
-      const all = [...new Set([...hardcoded, ...dbFacs.map((f) => f.name)])]
+      const all = [...new Set([...hardcoded, ...dbFacs.map((f: { name: string }) => f.name)])]
       if (all.length) where.facility = { in: all }
     } else if (province) {
       const dists = DISTRICTS[province] || []
       let allFacs: string[] = []
       for (const d of dists) allFacs = allFacs.concat(FACILITIES_BY_DISTRICT[d] || [])
       const dbFacs = await prisma.facility.findMany({ where: { province }, select: { name: true } })
-      allFacs = [...new Set([...allFacs, ...dbFacs.map((f) => f.name)])]
+      allFacs = [...new Set([...allFacs, ...dbFacs.map((f: { name: string }) => f.name)])]
       if (allFacs.length) where.facility = { in: allFacs }
     }
 
@@ -301,14 +301,14 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
     else if (district) {
       const hardcoded = FACILITIES_BY_DISTRICT[district] || []
       const dbFacs = await prisma.facility.findMany({ where: { district }, select: { name: true } })
-      const all = [...new Set([...hardcoded, ...dbFacs.map((f) => f.name)])]
+      const all = [...new Set([...hardcoded, ...dbFacs.map((f: { name: string }) => f.name)])]
       if (all.length) where.facility = { in: all }
     } else if (province) {
       const dists = DISTRICTS[province] || []
       let allFacs: string[] = []
       for (const d of dists) allFacs = allFacs.concat(FACILITIES_BY_DISTRICT[d] || [])
       const dbFacs = await prisma.facility.findMany({ where: { province }, select: { name: true } })
-      allFacs = [...new Set([...allFacs, ...dbFacs.map((f) => f.name)])]
+      allFacs = [...new Set([...allFacs, ...dbFacs.map((f: { name: string }) => f.name)])]
       if (allFacs.length) where.facility = { in: allFacs }
     }
 
@@ -505,14 +505,14 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
     else if (district) {
       const hardcoded = FACILITIES_BY_DISTRICT[district] || []
       const dbFacs = await prisma.facility.findMany({ where: { district }, select: { name: true } })
-      const all = [...new Set([...hardcoded, ...dbFacs.map((f) => f.name)])]
+      const all = [...new Set([...hardcoded, ...dbFacs.map((f: { name: string }) => f.name)])]
       if (all.length) where.facility = { in: all }
     } else if (province) {
       const dists = DISTRICTS[province] || []
       let allFacs: string[] = []
       for (const d of dists) allFacs = allFacs.concat(FACILITIES_BY_DISTRICT[d] || [])
       const dbFacs = await prisma.facility.findMany({ where: { province }, select: { name: true } })
-      allFacs = [...new Set([...allFacs, ...dbFacs.map((f) => f.name)])]
+      allFacs = [...new Set([...allFacs, ...dbFacs.map((f: { name: string }) => f.name)])]
       if (allFacs.length) where.facility = { in: allFacs }
     }
 

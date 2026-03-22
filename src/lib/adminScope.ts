@@ -11,7 +11,7 @@ export async function getAdminScopeWhere(user: any): Promise<Record<string, any>
     if (!district) return {}
     const hardcoded = FACILITIES_BY_DISTRICT[district] || []
     const dbFacs = await prisma.facility.findMany({ where: { district }, select: { name: true } })
-    const all = Array.from(new Set([...hardcoded, ...dbFacs.map((f) => f.name)]))
+    const all = Array.from(new Set([...hardcoded, ...dbFacs.map((f: { name: string }) => f.name)]))
     return all.length ? { facility: { in: all } } : {}
   }
 
@@ -24,7 +24,7 @@ export async function getAdminScopeWhere(user: any): Promise<Record<string, any>
   if (type === 'district') {
     const hardcoded = FACILITIES_BY_DISTRICT[value] || []
     const dbFacs = await prisma.facility.findMany({ where: { district: value }, select: { name: true } })
-    const all = Array.from(new Set([...hardcoded, ...dbFacs.map((f) => f.name)]))
+    const all = Array.from(new Set([...hardcoded, ...dbFacs.map((f: { name: string }) => f.name)]))
     return all.length ? { facility: { in: all } } : {}
   }
 
@@ -35,7 +35,7 @@ export async function getAdminScopeWhere(user: any): Promise<Record<string, any>
       allFacs = allFacs.concat(FACILITIES_BY_DISTRICT[d] || [])
     }
     const dbFacs = await prisma.facility.findMany({ where: { province: value }, select: { name: true } })
-    allFacs = Array.from(new Set([...allFacs, ...dbFacs.map((f) => f.name)]))
+    allFacs = Array.from(new Set([...allFacs, ...dbFacs.map((f: { name: string }) => f.name)]))
     return allFacs.length ? { facility: { in: allFacs } } : {}
   }
 

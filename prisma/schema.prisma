@@ -72,6 +72,22 @@ model Position {
   @@index([ministry_id])
 }
 
+// ─── Legacy Facility (kept for backward compat - existing data) ─────────────
+
+model Facility {
+  id          Int      @id @default(autoincrement())
+  facility_id String   @unique @default(cuid())
+  name        String   @unique
+  district    String
+  province    String
+  latitude    Float?
+  longitude   Float?
+  created_at  DateTime @default(now())
+
+  @@index([district])
+  @@index([province])
+}
+
 // ─── Auth & OTP ──────────────────────────────────────────────────────────────
 
 model OtpCode {
