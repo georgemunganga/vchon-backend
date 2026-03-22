@@ -5,6 +5,7 @@ import prisma from '../lib/prisma'
 import { requireSuperuser } from '../plugins/authenticate'
 import { hashPassword } from '../lib/auth'
 import { PROVINCES, DISTRICTS, FACILITIES_BY_DISTRICT } from '../lib/constants'
+import { auditLog, AUDIT_ACTIONS, actorFromRequest } from '../lib/audit'
 
 function formatLateDisplay(totalMinutes: number): string {
   const hours = Math.floor(totalMinutes / 60)
@@ -67,7 +68,15 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
   // DELETE /api/superuser/users/:userId
   fastify.delete('/superuser/users/:userId', { preHandler: requireSuperuser }, async (request, reply) => {
     const { userId } = request.params as any
+    const target = await prisma.user.findUnique({ where: { user_id: userId }, select: { name: true, email: true } })
     await prisma.user.delete({ where: { user_id: userId } })
+    await auditLog({
+      actor: actorFromRequest(request),
+      action: AUDIT_ACTIONS.DELETE_USER,
+      targetType: 'User',
+      targetId: userId,
+      metadata: { deleted_name: target?.name, deleted_email: target?.email },
+    })
     return reply.send({ message: 'User deleted' })
   })
 
@@ -79,6 +88,13 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
       return reply.code(400).send({ detail: 'Invalid role' })
     }
     const updated = await prisma.user.update({ where: { user_id: userId }, data: { role } })
+    await auditLog({
+      actor: actorFromRequest(request),
+      action: role === 'admin' ? AUDIT_ACTIONS.ASSIGN_ADMIN : AUDIT_ACTIONS.UPDATE_USER,
+      targetType: 'User',
+      targetId: userId,
+      metadata: { new_role: role },
+    })
     return reply.send({ user_id: updated.user_id, role: updated.role })
   })
 
@@ -104,6 +120,13 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
       where: { user_id: userId },
       data: { assigned_jurisdiction: { type, value } },
     })
+    await auditLog({
+      actor: actorFromRequest(request),
+      action: AUDIT_ACTIONS.UPDATE_ADMIN_SCOPE,
+      targetType: 'User',
+      targetId: userId,
+      metadata: { jurisdiction_type: type, jurisdiction_value: value },
+    })
     return reply.send({ user_id: updated.user_id, assigned_jurisdiction: updated.assigned_jurisdiction })
   })
 
@@ -128,7 +151,15 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
   // DELETE /api/superuser/facilities/:facilityId
   fastify.delete('/superuser/facilities/:facilityId', { preHandler: requireSuperuser }, async (request, reply) => {
     const { facilityId } = request.params as any
-    await prisma.facility.delete({ where: { facility_id: facilityId } })
+    const target = await (prisma as any).facility?.findUnique?.({ where: { facility_id: facilityId }, select: { name: true } }).catch(() => null)
+    await (prisma as any).facility?.delete?.({ where: { facility_id: facilityId } })
+    await auditLog({
+      actor: actorFromRequest(request),
+      action: AUDIT_ACTIONS.DELETE_ORG_UNIT,
+      targetType: 'Facility',
+      targetId: facilityId,
+      metadata: { deleted_name: target?.name },
+    })
     return reply.send({ message: 'Facility deleted' })
   })
 
@@ -349,8 +380,87 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
     }
 
     const buffer = await workbook.xlsx.writeBuffer()
+    // Audit log the export
+    await auditLog({
+      actor: actorFromRequest(request),
+      action: AUDIT_ACTIONS.EXPORT_ATTENDANCE_REPORT,
+      targetType: 'Attendance',
+      metadata: { province: province || 'all', district: district || 'all', facility: facility || 'all', date: date || 'all', record_count: records.length },
+    })
     reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     reply.header('Content-Disposition', `attachment; filename="attendance_report.xlsx"`)
     return reply.send(Buffer.from(buffer))
+  })
+
+  // ─── GET /api/superuser/audit ─────────────────────────────────────────────────
+  // Returns paginated audit logs with optional filters.
+  // Accessible by superuser role only.
+  fastify.get('/superuser/audit', { preHandler: requireSuperuser }, async (request, reply) => {
+    const query = request.query as any
+    const {
+      page = '1',
+      limit = '25',
+      search,
+      action,
+      role,
+      date_from,
+      date_to,
+    } = query
+
+    const where: any = {}
+
+    // Text search on actor name or actor_id
+    if (search) {
+      where.OR = [
+        { actor_name: { contains: search, mode: 'insensitive' } },
+        { actor_id:   { contains: search, mode: 'insensitive' } },
+      ]
+    }
+
+    if (action) where.action = action
+    if (role)   where.actor_role = role
+
+    // Date range filter
+    if (date_from || date_to) {
+      where.created_at = {}
+      if (date_from) {
+        const from = new Date(date_from)
+        from.setHours(0, 0, 0, 0)
+        where.created_at.gte = from
+      }
+      if (date_to) {
+        const to = new Date(date_to)
+        to.setHours(23, 59, 59, 999)
+        where.created_at.lte = to
+      }
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit)
+    const [logs, total] = await Promise.all([
+      (prisma as any).auditLog.findMany({
+        where,
+        orderBy: { created_at: 'desc' },
+        skip,
+        take: parseInt(limit),
+      }),
+      (prisma as any).auditLog.count({ where }),
+    ])
+
+    return reply.send({
+      logs: logs.map((l: any) => ({
+        id:          l.id,
+        actor_id:    l.actor_id,
+        actor_name:  l.actor_name,
+        actor_role:  l.actor_role,
+        action:      l.action,
+        target_type: l.target_type,
+        target_id:   l.target_id,
+        metadata:    l.metadata,
+        created_at:  l.created_at?.toISOString(),
+      })),
+      total,
+      page: parseInt(page),
+      limit: parseInt(limit),
+    })
   })
 }

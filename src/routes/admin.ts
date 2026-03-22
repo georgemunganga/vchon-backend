@@ -3,6 +3,7 @@ import ExcelJS from 'exceljs'
 import prisma from '../lib/prisma'
 import { requireAdmin } from '../plugins/authenticate'
 import { getAdminScopeWhere } from '../lib/adminScope'
+import { auditLog, AUDIT_ACTIONS, actorFromRequest } from '../lib/audit'
 
 function formatLateDisplay(totalMinutes: number): string {
   const hours = Math.floor(totalMinutes / 60)
@@ -287,6 +288,13 @@ export default async function adminRoutes(fastify: FastifyInstance) {
     }
 
     const buffer = await workbook.xlsx.writeBuffer()
+    // Audit log the export
+    await auditLog({
+      actor: actorFromRequest(request),
+      action: AUDIT_ACTIONS.EXPORT_ATTENDANCE_REPORT,
+      targetType: 'Attendance',
+      metadata: { facility: facility || 'all', date: date || 'all', record_count: records.length },
+    })
     reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     reply.header('Content-Disposition', `attachment; filename="attendance_export.xlsx"`)
     return reply.send(Buffer.from(buffer))
