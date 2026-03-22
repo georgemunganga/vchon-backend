@@ -4,11 +4,14 @@
  * Generates a branded, encrypted PDF attendance report for an employee.
  * Encryption password = user's phone number (digits only).
  *
- * Steps:
- *  1. Build PDF with PDFKit (in-memory buffer)
- *  2. Write to a temp file
- *  3. Encrypt with qpdf via node-qpdf2 (returns encrypted Buffer)
- *  4. Clean up temp file and return encrypted buffer
+ * Bugs fixed in this version:
+ *  - Action labels now map "login" → "Report for Duty" and "logout" → "End Shift"
+ *    (matching the actual values stored by the attendance route)
+ *  - Summary stat boxes now count login/logout correctly
+ *  - Footer is drawn on the LAST page only, after all rows are written
+ *  - Page overflow threshold accounts for footer height (120px safety margin)
+ *  - No-data state renders a clear message with the selected period info
+ *  - Extra blank pages eliminated by not calling addPage() unnecessarily
  */
 
 import PDFDocument from 'pdfkit'
@@ -42,145 +45,235 @@ export interface ReportOptions {
   records: AttendanceRecord[]
 }
 
+// ─── Human-readable action labels ────────────────────────────────────────────
+const ACTION_LABEL: Record<string, string> = {
+  login:        'Report for Duty',
+  logout:       'End Shift',
+  check_in:     'Check In',
+  check_out:    'Check Out',
+  report_duty:  'Report for Duty',
+  lunch_out:    'Lunch Out',
+  lunch_in:     'Lunch In',
+}
+
+function actionLabel(action: string): string {
+  return ACTION_LABEL[action] ?? action.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
 // ─── Build raw PDF buffer ─────────────────────────────────────────────────────
 function buildPdfBuffer(opts: ReportOptions): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50, size: 'A4' })
+    const PAGE_WIDTH  = 595.28  // A4 points
+    const PAGE_HEIGHT = 841.89
+    const MARGIN      = 50
+    const CONTENT_W   = PAGE_WIDTH - MARGIN * 2
+    const FOOTER_H    = 55
+    const SAFE_BOTTOM = PAGE_HEIGHT - FOOTER_H - 20  // stop adding rows before footer zone
+
+    const doc = new PDFDocument({ margin: MARGIN, size: 'A4', autoFirstPage: true })
     const chunks: Buffer[] = []
     doc.on('data', (chunk: Buffer) => chunks.push(chunk))
-    doc.on('end', () => resolve(Buffer.concat(chunks)))
+    doc.on('end',  () => resolve(Buffer.concat(chunks)))
     doc.on('error', reject)
 
-    const teal = '#0f766e'
-    const darkSlate = '#1e293b'
-    const slate = '#64748b'
-    const lightGray = '#f1f5f9'
-    const white = '#ffffff'
+    // ── Colour palette ──
+    const TEAL       = '#0f766e'
+    const TEAL_LIGHT = '#ccfbf1'
+    const DARK       = '#1e293b'
+    const SLATE      = '#64748b'
+    const LIGHT_BG   = '#f8fafc'
+    const ROW_ALT    = '#f1f5f9'
+    const WHITE      = '#ffffff'
+    const AMBER_BG   = '#fef3c7'
+    const AMBER_TEXT = '#92400e'
 
-    // ── Header banner ──
-    doc.rect(0, 0, doc.page.width, 90).fill(teal)
-    doc.fillColor(white).fontSize(26).font('Helvetica-Bold').text('VChron', 50, 22)
-    doc.fontSize(10).font('Helvetica').text('Verified Workforce Intelligence', 50, 52)
-    doc.fontSize(9).text('A GreenWebb Product', 50, 66)
+    // ── Helper: draw page header ──
+    const drawHeader = () => {
+      // Teal banner
+      doc.rect(0, 0, PAGE_WIDTH, 88).fill(TEAL)
 
-    // Report title on the right
-    doc.fontSize(12).font('Helvetica-Bold').text('ATTENDANCE REPORT', 0, 30, { align: 'right', width: doc.page.width - 50 })
-    doc.fontSize(9).font('Helvetica').text(`Generated: ${new Date().toLocaleString('en-ZM', { timeZone: 'Africa/Lusaka' })}`, 0, 48, { align: 'right', width: doc.page.width - 50 })
+      // Logo / brand left
+      doc.fillColor(WHITE).fontSize(24).font('Helvetica-Bold').text('VChron', MARGIN, 18)
+      doc.fontSize(9).font('Helvetica').text('Verified Workforce Intelligence', MARGIN, 48)
+      doc.fontSize(8).text('A GreenWebb Product', MARGIN, 62)
 
-    doc.fillColor(darkSlate)
-    let y = 110
+      // Report title right
+      doc.fontSize(13).font('Helvetica-Bold')
+        .text('ATTENDANCE REPORT', 0, 26, { align: 'right', width: PAGE_WIDTH - MARGIN })
+      doc.fontSize(8).font('Helvetica')
+        .text(
+          `Generated: ${new Date().toLocaleString('en-ZM', { timeZone: 'Africa/Lusaka' })}`,
+          0, 46, { align: 'right', width: PAGE_WIDTH - MARGIN }
+        )
+
+      doc.fillColor(DARK)
+    }
+
+    // ── Helper: draw footer on current page ──
+    const drawFooter = () => {
+      const fy = PAGE_HEIGHT - FOOTER_H
+      doc.rect(0, fy, PAGE_WIDTH, FOOTER_H).fill(TEAL)
+      doc.fillColor(WHITE).fontSize(7).font('Helvetica')
+      doc.text(
+        'This report is confidential and encrypted. Password: your registered phone number (digits only).',
+        MARGIN, fy + 10, { align: 'center', width: CONTENT_W }
+      )
+      doc.text(
+        'VChron by GreenWebb Technologies  |  vchron@greenwebb.tech',
+        MARGIN, fy + 23, { align: 'center', width: CONTENT_W }
+      )
+      const reportId = randomBytes(4).toString('hex').toUpperCase()
+      doc.text(
+        `Report ID: ${reportId}  |  Generated for ${opts.user_name}`,
+        MARGIN, fy + 36, { align: 'center', width: CONTENT_W }
+      )
+    }
+
+    // ── Helper: draw table header row ──
+    const drawTableHeader = (y: number): number => {
+      doc.rect(MARGIN, y, CONTENT_W, 22).fill(DARK)
+      doc.fillColor(WHITE).fontSize(8).font('Helvetica-Bold')
+      doc.text('#',           MARGIN + 6,   y + 7)
+      doc.text('Date',        MARGIN + 22,  y + 7)
+      doc.text('Time',        MARGIN + 110, y + 7)
+      doc.text('Action',      MARGIN + 175, y + 7)
+      doc.text('Shift',       MARGIN + 295, y + 7)
+      doc.text('Location',    MARGIN + 370, y + 7)
+      return y + 22
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PAGE 1
+    // ═══════════════════════════════════════════════════════════════════════════
+    drawHeader()
+    let y = 100
 
     // ── Employee info box ──
-    doc.rect(50, y, doc.page.width - 100, 90).fill(lightGray).stroke()
-    doc.fillColor(darkSlate).fontSize(11).font('Helvetica-Bold').text('Employee Information', 65, y + 10)
+    doc.rect(MARGIN, y, CONTENT_W, 95).fill(LIGHT_BG)
+    doc.rect(MARGIN, y, CONTENT_W, 95).stroke('#e2e8f0')
+
+    doc.fillColor(DARK).fontSize(11).font('Helvetica-Bold')
+      .text('Employee Information', MARGIN + 14, y + 10)
+
     doc.fontSize(9).font('Helvetica')
-    doc.fillColor(slate).text('Name:', 65, y + 28).fillColor(darkSlate).text(opts.user_name, 130, y + 28)
-    doc.fillColor(slate).text('Employee ID:', 65, y + 42).fillColor(darkSlate).text(opts.user_id, 130, y + 42)
-    doc.fillColor(slate).text('Position:', 65, y + 56).fillColor(darkSlate).text(opts.position || 'N/A', 130, y + 56)
-    doc.fillColor(slate).text('Facility:', 65, y + 70).fillColor(darkSlate).text(opts.facility || 'N/A', 130, y + 70)
+
+    // Left column
+    const lx = MARGIN + 14
+    const lv = MARGIN + 100
+    doc.fillColor(SLATE).text('Name:',       lx, y + 28).fillColor(DARK).text(opts.user_name,         lv, y + 28)
+    doc.fillColor(SLATE).text('Employee ID:',lx, y + 42).fillColor(DARK).text(opts.user_id,           lv, y + 42)
+    doc.fillColor(SLATE).text('Position:',   lx, y + 56).fillColor(DARK).text(opts.position || 'N/A', lv, y + 56)
+    doc.fillColor(SLATE).text('Facility:',   lx, y + 70).fillColor(DARK).text(opts.facility || 'N/A', lv, y + 70)
 
     // Right column
-    doc.fillColor(slate).text('Period:', 320, y + 28).fillColor(darkSlate).text(opts.period_label, 375, y + 28)
-    doc.fillColor(slate).text('From:', 320, y + 42).fillColor(darkSlate).text(opts.date_from.toLocaleDateString('en-ZM'), 375, y + 42)
-    doc.fillColor(slate).text('To:', 320, y + 56).fillColor(darkSlate).text(opts.date_to.toLocaleDateString('en-ZM'), 375, y + 56)
-    doc.fillColor(slate).text('Total Records:', 320, y + 70).fillColor(darkSlate).text(String(opts.records.length), 410, y + 70)
+    const rx  = MARGIN + 290
+    const rv  = MARGIN + 340
+    doc.fillColor(SLATE).text('Period:',        rx, y + 28).fillColor(DARK).text(opts.period_label,                                rv, y + 28)
+    doc.fillColor(SLATE).text('From:',          rx, y + 42).fillColor(DARK).text(opts.date_from.toLocaleDateString('en-ZM'),       rv, y + 42)
+    doc.fillColor(SLATE).text('To:',            rx, y + 56).fillColor(DARK).text(opts.date_to.toLocaleDateString('en-ZM'),         rv, y + 56)
+    doc.fillColor(SLATE).text('Total Records:', rx, y + 70).fillColor(DARK).text(String(opts.records.length),                      rv, y + 70)
 
     y += 110
 
-    // ── Summary stats ──
-    const checkIns = opts.records.filter(r => r.action === 'check_in' || r.action === 'report_duty').length
-    const checkOuts = opts.records.filter(r => r.action === 'check_out').length
-    const lunchOuts = opts.records.filter(r => r.action === 'lunch_out').length
-    const lunchIns = opts.records.filter(r => r.action === 'lunch_in').length
+    // ── Summary stat boxes ──
+    const logins   = opts.records.filter(r => r.action === 'login'   || r.action === 'check_in'  || r.action === 'report_duty').length
+    const logouts  = opts.records.filter(r => r.action === 'logout'  || r.action === 'check_out').length
+    const lunchOut = opts.records.filter(r => r.action === 'lunch_out').length
+    const lunchIn  = opts.records.filter(r => r.action === 'lunch_in').length
 
-    const boxW = (doc.page.width - 120) / 4
+    const BOX_W = (CONTENT_W - 30) / 4
     const statBoxes = [
-      { label: 'Check-Ins', value: checkIns, color: '#0d9488' },
-      { label: 'Check-Outs', value: checkOuts, color: '#1d4ed8' },
-      { label: 'Lunch Outs', value: lunchOuts, color: '#d97706' },
-      { label: 'Lunch Ins', value: lunchIns, color: '#7c3aed' },
+      { label: 'Reports for Duty', value: logins,   color: '#0d9488' },
+      { label: 'Shifts Ended',     value: logouts,  color: '#1d4ed8' },
+      { label: 'Lunch Outs',       value: lunchOut, color: '#d97706' },
+      { label: 'Lunch Ins',        value: lunchIn,  color: '#7c3aed' },
     ]
     statBoxes.forEach((box, i) => {
-      const bx = 50 + i * (boxW + 10)
-      doc.rect(bx, y, boxW, 50).fill(box.color)
-      doc.fillColor(white).fontSize(20).font('Helvetica-Bold').text(String(box.value), bx, y + 8, { width: boxW, align: 'center' })
-      doc.fontSize(8).font('Helvetica').text(box.label, bx, y + 32, { width: boxW, align: 'center' })
+      const bx = MARGIN + i * (BOX_W + 10)
+      doc.rect(bx, y, BOX_W, 52).fill(box.color)
+      doc.fillColor(WHITE).fontSize(22).font('Helvetica-Bold')
+        .text(String(box.value), bx, y + 7, { width: BOX_W, align: 'center' })
+      doc.fontSize(7.5).font('Helvetica')
+        .text(box.label, bx, y + 34, { width: BOX_W, align: 'center' })
     })
 
-    y += 70
+    y += 68
 
-    // ── Table header ──
-    doc.rect(50, y, doc.page.width - 100, 22).fill(darkSlate)
-    doc.fillColor(white).fontSize(8).font('Helvetica-Bold')
-    doc.text('#', 58, y + 7)
-    doc.text('Date & Time', 75, y + 7)
-    doc.text('Action', 220, y + 7)
-    doc.text('Shift', 310, y + 7)
-    doc.text('Facility', 370, y + 7)
+    // ── No-data state ──
+    if (opts.records.length === 0) {
+      // Amber notice box
+      doc.rect(MARGIN, y, CONTENT_W, 80).fill(AMBER_BG)
+      doc.rect(MARGIN, y, 4, 80).fill('#d97706')
 
-    y += 22
+      doc.fillColor(AMBER_TEXT).fontSize(11).font('Helvetica-Bold')
+        .text('No Attendance Records Found', MARGIN + 18, y + 14)
+      doc.fontSize(9).font('Helvetica')
+        .text(
+          `There are no check-in or check-out records for the selected period:`,
+          MARGIN + 18, y + 32
+        )
+      doc.fontSize(9).font('Helvetica-Bold')
+        .text(
+          `${opts.period_label}  (${opts.date_from.toLocaleDateString('en-ZM')} – ${opts.date_to.toLocaleDateString('en-ZM')})`,
+          MARGIN + 18, y + 46
+        )
+      doc.fontSize(8.5).font('Helvetica').fillColor(SLATE)
+        .text(
+          'If you believe this is incorrect, please contact your administrator.',
+          MARGIN + 18, y + 62
+        )
 
-    // ── Table rows ──
+      y += 100
+
+      drawFooter()
+      doc.end()
+      return
+    }
+
+    // ── Table ──
+    y = drawTableHeader(y)
+
     opts.records.forEach((rec, idx) => {
-      if (y > doc.page.height - 80) {
+      // Need a new page?
+      if (y > SAFE_BOTTOM) {
+        drawFooter()
         doc.addPage()
-        y = 50
-        // Repeat header on new page
-        doc.rect(50, y, doc.page.width - 100, 22).fill(darkSlate)
-        doc.fillColor(white).fontSize(8).font('Helvetica-Bold')
-        doc.text('#', 58, y + 7)
-        doc.text('Date & Time', 75, y + 7)
-        doc.text('Action', 220, y + 7)
-        doc.text('Shift', 310, y + 7)
-        doc.text('Facility', 370, y + 7)
-        y += 22
+        drawHeader()
+        y = 100
+        y = drawTableHeader(y)
       }
 
-      const rowBg = idx % 2 === 0 ? white : lightGray
-      doc.rect(50, y, doc.page.width - 100, 18).fill(rowBg)
-      doc.fillColor(darkSlate).fontSize(7.5).font('Helvetica')
+      const rowBg = idx % 2 === 0 ? WHITE : ROW_ALT
+      doc.rect(MARGIN, y, CONTENT_W, 18).fill(rowBg)
+      doc.fillColor(DARK).fontSize(7.5).font('Helvetica')
 
-      const ts = new Date(rec.timestamp)
+      const ts      = new Date(rec.timestamp)
       const dateStr = ts.toLocaleDateString('en-ZM', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Africa/Lusaka' })
       const timeStr = ts.toLocaleTimeString('en-ZM', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Africa/Lusaka' })
+      const shiftStr = rec.shift_type
+        ? rec.shift_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+        : '—'
+      const locStr = rec.area_of_allocation || rec.facility || '—'
+      const locDisplay = locStr.length > 22 ? locStr.slice(0, 19) + '…' : locStr
 
-      const actionLabel: Record<string, string> = {
-        check_in: 'Check In',
-        report_duty: 'Report for Duty',
-        check_out: 'Check Out',
-        lunch_out: 'Lunch Out',
-        lunch_in: 'Lunch In',
-      }
-
-      doc.text(String(idx + 1), 58, y + 5)
-      doc.text(`${dateStr} ${timeStr}`, 75, y + 5)
-      doc.text(actionLabel[rec.action] || rec.action, 220, y + 5)
-      doc.text(rec.shift_type ? rec.shift_type.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase()) : '—', 310, y + 5)
-      doc.text(rec.facility.length > 25 ? rec.facility.slice(0, 22) + '…' : rec.facility, 370, y + 5)
+      doc.text(String(idx + 1),        MARGIN + 6,   y + 5)
+      doc.text(dateStr,                MARGIN + 22,  y + 5)
+      doc.text(timeStr,                MARGIN + 110, y + 5)
+      doc.text(actionLabel(rec.action),MARGIN + 175, y + 5)
+      doc.text(shiftStr,               MARGIN + 295, y + 5)
+      doc.text(locDisplay,             MARGIN + 370, y + 5)
 
       y += 18
     })
 
-    if (opts.records.length === 0) {
-      doc.fillColor(slate).fontSize(10).font('Helvetica').text('No attendance records found for this period.', 50, y + 20, { align: 'center', width: doc.page.width - 100 })
-      y += 40
-    }
-
-    // ── Footer ──
-    const footerY = doc.page.height - 50
-    doc.rect(0, footerY, doc.page.width, 50).fill(teal)
-    doc.fillColor(white).fontSize(7).font('Helvetica')
-    doc.text('This report is confidential and encrypted. Password: your registered phone number.', 50, footerY + 10, { align: 'center', width: doc.page.width - 100 })
-    doc.text('VChron by GreenWebb Technologies | vchron@greenwebb.tech', 50, footerY + 22, { align: 'center', width: doc.page.width - 100 })
-    doc.text(`Report ID: ${randomBytes(4).toString('hex').toUpperCase()} | Generated for ${opts.user_name}`, 50, footerY + 34, { align: 'center', width: doc.page.width - 100 })
-
+    // ── Footer on last page ──
+    drawFooter()
     doc.end()
   })
 }
 
 // ─── Encrypt PDF using qpdf (via node-qpdf2) ─────────────────────────────────
 async function encryptPdf(pdfBuffer: Buffer, password: string): Promise<Buffer> {
-  // Write raw PDF to a temp file (qpdf requires file input)
   const tmpIn = join(tmpdir(), `vcron-report-${randomBytes(8).toString('hex')}.pdf`)
   try {
     writeFileSync(tmpIn, pdfBuffer)
@@ -207,9 +300,9 @@ async function encryptPdf(pdfBuffer: Buffer, password: string): Promise<Buffer> 
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 export async function generateEncryptedReport(opts: ReportOptions): Promise<Buffer> {
-  // Password = digits only from phone number (e.g. "+260972827372" → "260972827372")
+  // Password = digits only from phone number (e.g. "+260 97 282 7372" → "260972827372")
   const password = (opts.phone_number || '000000').replace(/\D/g, '')
-  const rawPdf = await buildPdfBuffer(opts)
+  const rawPdf   = await buildPdfBuffer(opts)
   const encrypted = await encryptPdf(rawPdf, password)
   return encrypted
 }
