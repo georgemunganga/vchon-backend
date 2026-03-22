@@ -23,9 +23,10 @@ import prisma from '../lib/prisma'
 
 export default async function dataRoutes(fastify: FastifyInstance) {
 
-  // ─── NEW: Ministries ──────────────────────────────────────────────────────────
+  // ─── NEW: Ministries (active only — filtered server-side) ────────────────────────────────────────
   fastify.get('/data/ministries', async (_req, reply) => {
     const ministries = await prisma.ministry.findMany({
+      where: { is_active: true },   // only return ministries activated by Superuser
       orderBy: { name: 'asc' },
       select: { id: true, name: true, unit_term: true },
     })

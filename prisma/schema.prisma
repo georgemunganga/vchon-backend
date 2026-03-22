@@ -13,6 +13,7 @@ model Ministry {
   id         Int       @id @default(autoincrement())
   name       String    @unique // e.g., "Ministry of Health"
   unit_term  String    // e.g., "Facility", "School", "Office"
+  is_active  Boolean   @default(false) // only active ministries returned by API
   created_at DateTime  @default(now())
 
   org_units  OrgUnit[]
@@ -20,6 +21,7 @@ model Ministry {
   users      User[]
 
   @@index([name])
+  @@index([is_active])
 }
 
 model Province {

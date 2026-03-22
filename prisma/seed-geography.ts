@@ -187,17 +187,54 @@ async function main() {
   console.log('🌍  Starting VChron Geography Seeder...\n')
 
   // ─── 1. Ministries ────────────────────────────────────────────────────────
+  // Active ministries (available for registration)
   const healthMinistry = await prisma.ministry.upsert({
     where: { name: 'Ministry of Health' },
-    update: {},
-    create: { name: 'Ministry of Health', unit_term: 'Facility' },
+    update: { is_active: true },
+    create: { name: 'Ministry of Health', unit_term: 'Facility', is_active: true },
   })
   const educationMinistry = await prisma.ministry.upsert({
     where: { name: 'Ministry of Education' },
-    update: {},
-    create: { name: 'Ministry of Education', unit_term: 'School' },
+    update: { is_active: true },
+    create: { name: 'Ministry of Education', unit_term: 'School', is_active: true },
   })
-  console.log(`✅  Ministries seeded: Health (id:${healthMinistry.id}), Education (id:${educationMinistry.id})`)
+  console.log(`✅  Active Ministries seeded: Health (id:${healthMinistry.id}), Education (id:${educationMinistry.id})`)
+
+  // Inactive ministries (seeded but not yet available — Superuser activates later)
+  const INACTIVE_MINISTRIES = [
+    { name: 'Ministry of Finance and National Planning', unit_term: 'Office' },
+    { name: 'Ministry of Home Affairs and Internal Security', unit_term: 'Office' },
+    { name: 'Ministry of Justice', unit_term: 'Office' },
+    { name: 'Ministry of Defence', unit_term: 'Office' },
+    { name: 'Ministry of Foreign Affairs and International Cooperation', unit_term: 'Office' },
+    { name: 'Ministry of Agriculture', unit_term: 'Office' },
+    { name: 'Ministry of Fisheries and Livestock', unit_term: 'Office' },
+    { name: 'Ministry of Mines and Minerals Development', unit_term: 'Office' },
+    { name: 'Ministry of Energy', unit_term: 'Office' },
+    { name: 'Ministry of Water Development and Sanitation', unit_term: 'Office' },
+    { name: 'Ministry of Infrastructure, Housing and Urban Development', unit_term: 'Office' },
+    { name: 'Ministry of Transport and Logistics', unit_term: 'Office' },
+    { name: 'Ministry of Commerce, Trade and Industry', unit_term: 'Office' },
+    { name: 'Ministry of Labour and Social Security', unit_term: 'Office' },
+    { name: 'Ministry of Community Development and Social Services', unit_term: 'Office' },
+    { name: 'Ministry of Youth, Sport and Arts', unit_term: 'Office' },
+    { name: 'Ministry of Tourism', unit_term: 'Office' },
+    { name: 'Ministry of Green Economy and Environment', unit_term: 'Office' },
+    { name: 'Ministry of Technology and Science', unit_term: 'Office' },
+    { name: 'Ministry of Local Government and Rural Development', unit_term: 'Office' },
+    { name: 'Ministry of Lands and Natural Resources', unit_term: 'Office' },
+    { name: 'Ministry of Religious Affairs and National Guidance', unit_term: 'Office' },
+    { name: 'Ministry of Small and Medium Enterprise Development', unit_term: 'Office' },
+    { name: 'Ministry of Gender', unit_term: 'Office' },
+  ]
+  for (const m of INACTIVE_MINISTRIES) {
+    await prisma.ministry.upsert({
+      where: { name: m.name },
+      update: { is_active: false },
+      create: { name: m.name, unit_term: m.unit_term, is_active: false },
+    })
+  }
+  console.log(`✅  Inactive Ministries seeded: ${INACTIVE_MINISTRIES.length} ministries (awaiting Superuser activation)`)
 
   // ─── 2. Provinces ────────────────────────────────────────────────────────
   const provinceMap: Record<string, number> = {}
