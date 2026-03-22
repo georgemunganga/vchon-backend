@@ -14,28 +14,45 @@ async function getShiftConfig() {
 
 export default async function attendanceRoutes(fastify: FastifyInstance) {
   // GET /api/shifts/available
+  // Returns all defined shifts plus the user's pre-assigned shift (if any).
+  // Shape: { shifts: [{ key, label, start, end }], assigned_shift: string | null }
   fastify.get('/shifts/available', { preHandler: authenticate }, async (request, reply) => {
     const config = await getShiftConfig()
-    const user = (request as any).user
 
+    // Re-fetch user from DB so we always have the latest assigned_shift
+    // (the JWT payload may be stale if admin updated it after last login)
+    const jwtUser = (request as any).user
+    const user = await prisma.user.findUnique({ where: { user_id: jwtUser.user_id } })
+    if (!user) return reply.code(401).send({ detail: 'User not found' })
+
+    // Build shift list with consistent key / label / start / end shape
     const shifts: any[] = [
-      { id: 'morning',   name: 'Morning',   start: config.morning_start,   end: config.morning_end },
-      { id: 'afternoon', name: 'Afternoon', start: config.afternoon_start, end: config.afternoon_end },
-      { id: 'night',     name: 'Night',     start: config.night_start,     end: config.night_end },
-      { id: 'four_off',  name: 'Four Off',  start: config.four_off_start,  end: config.four_off_end },
-      { id: 'on_call',   name: 'On Call',   start: config.on_call_start,   end: config.on_call_end },
+      { key: 'morning',   label: 'Morning',   start: config.morning_start,   end: config.morning_end },
+      { key: 'afternoon', label: 'Afternoon', start: config.afternoon_start, end: config.afternoon_end },
+      { key: 'night',     label: 'Night',     start: config.night_start,     end: config.night_end },
+      { key: 'four_off',  label: 'Four Off',  start: config.four_off_start,  end: config.four_off_end },
+      { key: 'on_call',   label: 'On Call',   start: config.on_call_start,   end: config.on_call_end },
     ]
 
     if (user.custom_shift_start && user.custom_shift_end) {
       shifts.push({
-        id: 'custom',
-        name: 'Custom',
+        key: 'custom',
+        label: 'Custom',
         start: user.custom_shift_start,
         end: user.custom_shift_end,
       })
     }
 
-    return reply.send({ shifts })
+    // null or 'self_select' → user must pick manually
+    const assignedShift =
+      user.assigned_shift && user.assigned_shift !== 'self_select'
+        ? user.assigned_shift
+        : null
+
+    return reply.send({
+      shifts,
+      assigned_shift: assignedShift,
+    })
   })
 
   // POST /api/attendance
