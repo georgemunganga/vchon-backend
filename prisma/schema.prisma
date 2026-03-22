@@ -218,6 +218,26 @@ model ShiftConfig {
   updated_at           DateTime @updatedAt
 }
 
+// ─── Account Deletion Requests ──────────────────────────────────────────────
+
+model DeletionRequest {
+  id           Int       @id @default(autoincrement())
+  request_id   String    @unique @default(cuid())
+  user_id      String
+  user_name    String
+  user_email   String
+  reason       String?
+  status       String    @default("pending") // "pending" | "approved" | "rejected"
+  reviewed_by  String?   // admin/superuser user_id who actioned it
+  reviewer_name String?
+  reviewed_at  DateTime?
+  created_at   DateTime  @default(now())
+
+  @@index([status])
+  @@index([user_id])
+  @@index([created_at])
+}
+
 // ─── Audit Trail ─────────────────────────────────────────────────────────────
 
 model AuditLog {

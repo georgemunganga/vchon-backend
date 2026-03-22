@@ -8,6 +8,7 @@ import dataRoutes from './routes/data'
 import attendanceRoutes from './routes/attendance'
 import adminRoutes from './routes/admin'
 import superuserRoutes from './routes/superuser'
+import userRoutes from './routes/user'
 
 const PORT = parseInt(process.env.PORT || '8000', 10)
 const HOST = process.env.HOST || '0.0.0.0'
@@ -160,6 +161,7 @@ async function bootstrap() {
     await api.register(attendanceRoutes)
     await api.register(adminRoutes)
     await api.register(superuserRoutes)
+    await api.register(userRoutes)
   }, { prefix: '/api' })
 
   // 404 handler
