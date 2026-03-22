@@ -44,6 +44,7 @@ export async function sendMail(options: {
   subject: string
   html: string
   text?: string
+  attachments?: Array<{ filename: string; content: Buffer; contentType: string }>
 }): Promise<void> {
   if (!user || !pass) {
     console.warn('[Mailer] MAIL_USERNAME or MAIL_PASSWORD not set — email not sent.')
@@ -58,6 +59,11 @@ export async function sendMail(options: {
       subject: options.subject,
       html: options.html,
       text: options.text,
+      attachments: options.attachments?.map(a => ({
+        filename: a.filename,
+        content: a.content,
+        contentType: a.contentType,
+      })),
     })
     console.log(`[Mailer] Email sent to ${options.to} — messageId: ${info.messageId}`)
   } catch (err) {

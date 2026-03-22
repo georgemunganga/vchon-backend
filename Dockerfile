@@ -6,8 +6,8 @@ FROM node:22-alpine AS builder
 # Install pnpm via corepack
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
-# Install openssl so Prisma can detect it during build
-RUN apk add --no-cache openssl
+# Install openssl so Prisma can detect it during build, and qpdf for PDF encryption
+RUN apk add --no-cache openssl qpdf
 
 WORKDIR /app
 
@@ -35,8 +35,8 @@ FROM node:22-alpine AS runner
 
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
-# Install openssl (Prisma runtime) + curl (available for manual checks)
-RUN apk add --no-cache openssl curl
+# Install openssl (Prisma runtime) + curl (available for manual checks) + qpdf (PDF encryption)
+RUN apk add --no-cache openssl curl qpdf
 
 WORKDIR /app
 
@@ -60,5 +60,9 @@ EXPOSE 8000
 # No HEALTHCHECK here — Coolify manages healthchecks via its own UI
 # to avoid hardcoded port conflicts when Coolify injects a different PORT env var
 
-# Start server
-CMD ["node", "dist/server.js"]
+# Copy startup script
+COPY start.sh ./start.sh
+RUN chmod +x ./start.sh
+
+# Start server (runs prisma db push if DIRECT_URL is set, then starts node)
+CMD ["sh", "start.sh"]

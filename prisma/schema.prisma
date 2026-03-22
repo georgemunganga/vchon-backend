@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 // ─── Geography & Organisation Hierarchy ──────────────────────────────────────
@@ -141,6 +142,7 @@ model User {
   org_unit              OrgUnit?      @relation(fields: [org_unit_id], references: [id])
   sessions              UserSession[]
   attendance            Attendance[]
+  reports               UserReport[]
 
   @@index([role])
   @@index([facility])
@@ -250,6 +252,29 @@ model DeletionRequest {
   created_at   DateTime  @default(now())
 
   @@index([status])
+  @@index([user_id])
+  @@index([created_at])
+}
+
+// ─── User Reports ───────────────────────────────────────────────────────────
+
+model UserReport {
+  id           Int      @id @default(autoincrement())
+  report_id    String   @unique @default(cuid())
+  user_id      String
+  user_name    String
+  period_label String   // e.g. "March 2026", "Week 12 2026", "01 Mar – 07 Mar 2026"
+  period_type  String   // "monthly" | "weekly" | "daily" | "custom"
+  date_from    DateTime
+  date_to      DateTime
+  record_count Int      @default(0)
+  file_url     String?  // direct download URL (stored on server temp or S3)
+  emailed      Boolean  @default(false)
+  emailed_at   DateTime?
+  created_at   DateTime @default(now())
+
+  user         User     @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
   @@index([user_id])
   @@index([created_at])
 }
