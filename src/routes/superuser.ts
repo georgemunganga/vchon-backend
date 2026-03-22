@@ -600,7 +600,11 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
   fastify.put('/superuser/admins/:adminId/scope', { preHandler: requireSuperuser }, async (request, reply) => {
     const { adminId } = request.params as any
     const body = request.body as any
-    const { ministry_id, scope_type, scope_value } = body
+    const { ministry_id: raw_ministry_id, scope_type, scope_value } = body
+    // ministry_id arrives as a string from JSON form fields — parse to Int
+    const ministry_id = raw_ministry_id != null && raw_ministry_id !== ''
+      ? parseInt(String(raw_ministry_id), 10)
+      : undefined
 
     if (!scope_type || !['province', 'district', 'facility', 'national'].includes(scope_type)) {
       return reply.code(400).send({ detail: 'scope_type must be province, district, facility, or national' })
