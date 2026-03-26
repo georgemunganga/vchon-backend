@@ -28,14 +28,36 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
   fastify.get('/superuser/stats', { preHandler: requireSuperuser }, async (_req, reply) => {
     const today = new Date(); today.setHours(0, 0, 0, 0)
 
-    const [totalUsers, totalFacilities, todayAttendance, totalAttendance] = await Promise.all([
+    // Users who clocked in today but have not clocked out yet
+    const onDutyRaw = await prisma.$queryRaw<{ user_id: string }[]>`
+      SELECT DISTINCT a.user_id FROM "Attendance" a
+      WHERE a.action = 'login'
+        AND a.timestamp >= ${today}
+        AND NOT EXISTS (
+          SELECT 1 FROM "Attendance" b
+          WHERE b.user_id = a.user_id AND b.action = 'logout' AND b.timestamp > a.timestamp
+        )
+    `
+
+    const [totalUsers, totalAdmins, totalSuperusers, totalFacilities, todayAttendance, totalAttendance] = await Promise.all([
       prisma.user.count({ where: { role: 'user' } }),
-      prisma.facility.count(),
+      prisma.user.count({ where: { role: 'admin' } }),
+      prisma.user.count({ where: { role: 'superuser' } }),
+      prisma.orgUnit.count(),
       prisma.attendance.count({ where: { timestamp: { gte: today } } }),
       prisma.attendance.count(),
     ])
 
-    return reply.send({ total_users: totalUsers, total_facilities: totalFacilities, today_attendance: todayAttendance, total_attendance: totalAttendance })
+    return reply.send({
+      total_users: totalUsers,
+      total_admins: totalAdmins,
+      total_superusers: totalSuperusers,
+      total_facilities: totalFacilities,
+      today_logins: todayAttendance,
+      currently_on_duty: onDutyRaw.length,
+      today_attendance: todayAttendance,
+      total_attendance: totalAttendance,
+    })
   })
 
   // GET /api/superuser/users
@@ -135,35 +157,72 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
     return reply.send({ user_id: updated.user_id, assigned_jurisdiction: updated.assigned_jurisdiction })
   })
 
-  // GET /api/superuser/facilities
-  fastify.get('/superuser/facilities', { preHandler: requireSuperuser }, async (_req, reply) => {
-    const dbFacs = await prisma.facility.findMany({ orderBy: { name: 'asc' } })
-    return reply.send({ facilities: dbFacs })
-  })
-
-  // POST /api/superuser/facilities
-  fastify.post('/superuser/facilities', { preHandler: requireSuperuser }, async (request, reply) => {
-    const { name, district, province, latitude, longitude } = request.body as any
-    if (!name || !district || !province) return reply.code(400).send({ detail: 'name, district, province required' })
-
-    const facilityId = `fac_${uuidv4().replace(/-/g, '').slice(0, 12)}`
-    const facility = await prisma.facility.create({
-      data: { facility_id: facilityId, name, district, province, latitude: latitude ?? null, longitude: longitude ?? null },
+  // GET /api/superuser/facilities  (backed by OrgUnit — the canonical facility store)
+  fastify.get('/superuser/facilities', { preHandler: requireSuperuser }, async (request, reply) => {
+    const { search, district_id, ministry_id: minId } = (request.query as any)
+    const where: any = {}
+    if (search) where.name = { contains: search, mode: 'insensitive' }
+    if (district_id) where.district_id = parseInt(district_id)
+    if (minId) where.ministry_id = parseInt(minId)
+    const units = await prisma.orgUnit.findMany({
+      where,
+      orderBy: { name: 'asc' },
+      include: {
+        district: { include: { province: true } },
+        ministry: { select: { name: true } },
+        _count: { select: { users: true } },
+      },
     })
-    return reply.code(201).send(facility)
+    const facilities = units.map(u => ({
+      id: u.id,
+      name: u.name,
+      district: u.district?.name ?? null,
+      province: u.district?.province?.name ?? null,
+      ministry: u.ministry?.name ?? null,
+      staff_count: u._count.users,
+      latitude: u.latitude,
+      longitude: u.longitude,
+    }))
+    return reply.send({ facilities, total: facilities.length })
   })
 
-  // DELETE /api/superuser/facilities/:facilityId
+  // POST /api/superuser/facilities — create a new OrgUnit
+  fastify.post('/superuser/facilities', { preHandler: requireSuperuser }, async (request, reply) => {
+    const { name, district_id, ministry_id: minId, latitude, longitude } = request.body as any
+    if (!name || !district_id) return reply.code(400).send({ detail: 'name and district_id are required' })
+    const unit = await prisma.orgUnit.create({
+      data: {
+        name,
+        district_id: parseInt(district_id),
+        ministry_id: minId ? parseInt(minId) : null,
+        latitude: latitude !== undefined ? latitude : null,
+        longitude: longitude !== undefined ? longitude : null,
+      },
+    })
+    await auditLog({
+      actor: actorFromRequest(request),
+      action: AUDIT_ACTIONS.CREATE_ORG_UNIT,
+      targetType: 'OrgUnit',
+      targetId: String(unit.id),
+      metadata: { name: unit.name },
+    })
+    return reply.code(201).send(unit)
+  })
+
+  // DELETE /api/superuser/facilities/:facilityId — delete an OrgUnit
   fastify.delete('/superuser/facilities/:facilityId', { preHandler: requireSuperuser }, async (request, reply) => {
     const { facilityId } = request.params as any
-    const target = await (prisma as any).facility?.findUnique?.({ where: { facility_id: facilityId }, select: { name: true } }).catch(() => null)
-    await (prisma as any).facility?.delete?.({ where: { facility_id: facilityId } })
+    const id = parseInt(facilityId)
+    const target = await prisma.orgUnit.findUnique({ where: { id }, select: { name: true, _count: { select: { users: true } } } }).catch(() => null)
+    if (!target) return reply.code(404).send({ detail: 'Facility not found' })
+    if (target._count.users > 0) return reply.code(400).send({ detail: `Cannot delete: ${target._count.users} staff assigned to this facility` })
+    await prisma.orgUnit.delete({ where: { id } })
     await auditLog({
       actor: actorFromRequest(request),
       action: AUDIT_ACTIONS.DELETE_ORG_UNIT,
-      targetType: 'Facility',
+      targetType: 'OrgUnit',
       targetId: facilityId,
-      metadata: { deleted_name: target?.name },
+      metadata: { deleted_name: target.name },
     })
     return reply.send({ message: 'Facility deleted' })
   })
@@ -723,7 +782,7 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
       prisma.orgUnit.findMany({ where: orgWhere, orderBy: { name: 'asc' } }),
       prisma.user.findMany({
         where: { role: 'user', setup_complete: true },
-        select: { user_id: true, name: true, position: true, org_unit_id: true, assigned_shift: true },
+        select: { user_id: true, name: true, position: true, org_unit_id: true, assigned_shift: true, phone_number: true, email: true, created_at: true },
       }),
     ])
 
@@ -736,7 +795,7 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
             .map((unit: any) => ({
               id: unit.id, name: unit.name, type: unit.type,
               users: users.filter((u: any) => u.org_unit_id === unit.id)
-                .map((u: any) => ({ user_id: u.user_id, name: u.name, position: u.position, assigned_shift: u.assigned_shift })),
+                .map((u: any) => ({ user_id: u.user_id, name: u.name, position: u.position, assigned_shift: u.assigned_shift, phone: u.phone_number, email: u.email, created_at: u.created_at?.toISOString() })),
             }))
           return {
             id: dist.id, name: dist.name, org_units: distUnits,
@@ -798,7 +857,7 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
       prisma.orgUnit.findMany({ where: orgUnitWhere, orderBy: { name: 'asc' } }),
       prisma.user.findMany({
         where: { role: 'user' },
-        select: { user_id: true, name: true, position: true, org_unit_id: true, assigned_shift: true },
+        select: { user_id: true, name: true, position: true, org_unit_id: true, assigned_shift: true, phone_number: true, email: true, created_at: true },
       }),
     ])
     const tree = provinces.map((prov: any) => {
@@ -810,7 +869,7 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
             .map((unit: any) => ({
               id: unit.id, name: unit.name, type: unit.type,
               users: users.filter((u: any) => u.org_unit_id === unit.id)
-                .map((u: any) => ({ user_id: u.user_id, name: u.name, position: u.position, assigned_shift: u.assigned_shift })),
+                .map((u: any) => ({ user_id: u.user_id, name: u.name, position: u.position, assigned_shift: u.assigned_shift, phone: u.phone_number, email: u.email, created_at: u.created_at?.toISOString() })),
             }))
           return {
             id: dist.id, name: dist.name, org_units: distUnits,

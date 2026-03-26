@@ -47,17 +47,17 @@ model District {
 model OrgUnit {
   id          Int      @id @default(autoincrement())
   name        String
-  ministry_id Int
+  ministry_id Int?
   district_id Int
   latitude    Float?
   longitude   Float?
   created_at  DateTime @default(now())
 
-  ministry    Ministry @relation(fields: [ministry_id], references: [id])
-  district    District @relation(fields: [district_id], references: [id])
+  ministry    Ministry? @relation(fields: [ministry_id], references: [id])
+  district    District  @relation(fields: [district_id], references: [id])
   users       User[]
 
-  @@unique([name, district_id, ministry_id])
+  @@unique([name, district_id])
   @@index([district_id])
   @@index([ministry_id])
 }
