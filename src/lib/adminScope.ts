@@ -1,42 +1,57 @@
 import prisma from './prisma'
-import { FACILITIES_BY_DISTRICT, DISTRICTS } from './constants'
 
+/**
+ * Build a Prisma `where` clause that scopes attendance/notification queries
+ * to the admin's assigned jurisdiction.
+ *
+ * Jurisdiction types:
+ *  - national  → no filter (see all)
+ *  - province  → filter by facility names in that province (via OrgUnit)
+ *  - district  → filter by facility names in that district (via OrgUnit)
+ *  - facility  → exact facility name match
+ *
+ * Falls back to no filter if jurisdiction is not set.
+ * Uses OrgUnit (not the empty legacy Facility table) for facility resolution.
+ */
 export async function getAdminScopeWhere(user: any): Promise<Record<string, any>> {
+  // Superusers always see everything
   if (user.role === 'superuser') return {}
 
   const jurisdiction = user.assigned_jurisdiction as { type: string; value: string } | null
-  if (!jurisdiction) {
-    // Fallback: scope to user's own district
-    const district = user.district
-    if (!district) return {}
-    const hardcoded = FACILITIES_BY_DISTRICT[district] || []
-    const dbFacs = await prisma.facility.findMany({ where: { district }, select: { name: true } })
-    const all = Array.from(new Set([...hardcoded, ...dbFacs.map((f: { name: string }) => f.name)]))
-    return all.length ? { facility: { in: all } } : {}
-  }
+
+  // No jurisdiction assigned → no filter (see all records)
+  if (!jurisdiction || jurisdiction.type === 'national') return {}
 
   const { type, value } = jurisdiction
 
   if (type === 'facility') {
+    // Exact facility name match on Attendance.facility
     return { facility: value }
   }
 
   if (type === 'district') {
-    const hardcoded = FACILITIES_BY_DISTRICT[value] || []
-    const dbFacs = await prisma.facility.findMany({ where: { district: value }, select: { name: true } })
-    const all = Array.from(new Set([...hardcoded, ...dbFacs.map((f: { name: string }) => f.name)]))
-    return all.length ? { facility: { in: all } } : {}
+    // Resolve all OrgUnit names in this district
+    const units = await prisma.orgUnit.findMany({
+      where: { district: { name: { contains: value, mode: 'insensitive' } } },
+      select: { name: true },
+    })
+    const names = units.map((u: { name: string }) => u.name)
+    if (names.length === 0) {
+      // Fallback: partial match on facility string
+      return { facility: { contains: value, mode: 'insensitive' } }
+    }
+    return { facility: { in: names } }
   }
 
   if (type === 'province') {
-    const provinceDists = DISTRICTS[value] || []
-    let allFacs: string[] = []
-    for (const d of provinceDists) {
-      allFacs = allFacs.concat(FACILITIES_BY_DISTRICT[d] || [])
-    }
-    const dbFacs = await prisma.facility.findMany({ where: { province: value }, select: { name: true } })
-    allFacs = Array.from(new Set([...allFacs, ...dbFacs.map((f: { name: string }) => f.name)]))
-    return allFacs.length ? { facility: { in: allFacs } } : {}
+    // Resolve all OrgUnit names in all districts of this province
+    const units = await prisma.orgUnit.findMany({
+      where: { district: { province: { name: { contains: value, mode: 'insensitive' } } } },
+      select: { name: true },
+    })
+    const names = units.map((u: { name: string }) => u.name)
+    if (names.length === 0) return {}
+    return { facility: { in: names } }
   }
 
   return {}
