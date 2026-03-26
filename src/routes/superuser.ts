@@ -28,7 +28,7 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
   fastify.get('/superuser/stats', { preHandler: requireSuperuser }, async (_req, reply) => {
     const today = new Date(); today.setHours(0, 0, 0, 0)
 
-    // Users who clocked in today but have not clocked out yet
+    // Users currently on duty (clocked in today, no logout after)
     const onDutyRaw = await prisma.$queryRaw<{ user_id: string }[]>`
       SELECT DISTINCT a.user_id FROM "Attendance" a
       WHERE a.action = 'login'
@@ -38,6 +38,28 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
           WHERE b.user_id = a.user_id AND b.action = 'logout' AND b.timestamp > a.timestamp
         )
     `
+
+    // Today's login records for late/on-time/early breakdown
+    const todayLogins = await prisma.attendance.findMany({
+      where: { action: 'login', timestamp: { gte: today } },
+      select: { timestamp: true, shift_type: true },
+    })
+    const config = await prisma.shiftConfig.findUnique({ where: { config_id: 'default' } })
+    let todayLate = 0, todayOnTime = 0, todayEarly = 0
+    for (const r of todayLogins) {
+      if (!config || !r.shift_type) { todayOnTime++; continue }
+      const shiftStartStr = (config as any)[`${r.shift_type}_start`]
+      if (!shiftStartStr) { todayOnTime++; continue }
+      const shiftStartMins = parseTimeToMinutes(shiftStartStr)
+      const grace = config.grace_period_minutes || 15
+      const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
+      const recordSecs = r.timestamp.getHours() * 3600 + r.timestamp.getMinutes() * 60 + r.timestamp.getSeconds()
+      const shiftStartSecs = shiftStartMins * 60
+      const graceSecs = grace * 60
+      if (recordMins < shiftStartMins) todayEarly++
+      else if (recordSecs <= shiftStartSecs + graceSecs) todayOnTime++
+      else todayLate++
+    }
 
     const [totalUsers, totalAdmins, totalSuperusers, totalFacilities, todayAttendance, totalAttendance] = await Promise.all([
       prisma.user.count({ where: { role: 'user' } }),
@@ -57,6 +79,9 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
       currently_on_duty: onDutyRaw.length,
       today_attendance: todayAttendance,
       total_attendance: totalAttendance,
+      today_late: todayLate,
+      today_on_time: todayOnTime,
+      today_early: todayEarly,
     })
   })
 
@@ -277,19 +302,26 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
     const { province, district, facility, date, page = '1', limit = '100' } = query
 
     const where: any = {}
-    if (facility) where.facility = facility
-    else if (district) {
-      const hardcoded = FACILITIES_BY_DISTRICT[district] || []
-      const dbFacs = await prisma.facility.findMany({ where: { district }, select: { name: true } })
-      const all = [...new Set([...hardcoded, ...dbFacs.map((f: { name: string }) => f.name)])]
-      if (all.length) where.facility = { in: all }
+    if (facility) {
+      where.facility = facility
+    } else if (district) {
+      // Look up OrgUnit names for this district
+      const distRecord = await prisma.district.findFirst({ where: { name: district } })
+      if (distRecord) {
+        const units = await prisma.orgUnit.findMany({ where: { district_id: distRecord.id }, select: { name: true } })
+        const names = units.map((u: { name: string }) => u.name)
+        if (names.length) where.facility = { in: names }
+      }
     } else if (province) {
-      const dists = DISTRICTS[province] || []
-      let allFacs: string[] = []
-      for (const d of dists) allFacs = allFacs.concat(FACILITIES_BY_DISTRICT[d] || [])
-      const dbFacs = await prisma.facility.findMany({ where: { province }, select: { name: true } })
-      allFacs = [...new Set([...allFacs, ...dbFacs.map((f: { name: string }) => f.name)])]
-      if (allFacs.length) where.facility = { in: allFacs }
+      // Look up all OrgUnit names under this province
+      const provRecord = await prisma.province.findFirst({ where: { name: province } })
+      if (provRecord) {
+        const dists = await prisma.district.findMany({ where: { province_id: provRecord.id }, select: { id: true } })
+        const distIds = dists.map((d: { id: number }) => d.id)
+        const units = await prisma.orgUnit.findMany({ where: { district_id: { in: distIds } }, select: { name: true } })
+        const names = units.map((u: { name: string }) => u.name)
+        if (names.length) where.facility = { in: names }
+      }
     }
 
     if (date) {
@@ -356,19 +388,24 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
     const { province, district, facility, date } = query
 
     const where: any = {}
-    if (facility) where.facility = facility
-    else if (district) {
-      const hardcoded = FACILITIES_BY_DISTRICT[district] || []
-      const dbFacs = await prisma.facility.findMany({ where: { district }, select: { name: true } })
-      const all = [...new Set([...hardcoded, ...dbFacs.map((f: { name: string }) => f.name)])]
-      if (all.length) where.facility = { in: all }
+    if (facility) {
+      where.facility = facility
+    } else if (district) {
+      const distRecord = await prisma.district.findFirst({ where: { name: district } })
+      if (distRecord) {
+        const units = await prisma.orgUnit.findMany({ where: { district_id: distRecord.id }, select: { name: true } })
+        const names = units.map((u: { name: string }) => u.name)
+        if (names.length) where.facility = { in: names }
+      }
     } else if (province) {
-      const dists = DISTRICTS[province] || []
-      let allFacs: string[] = []
-      for (const d of dists) allFacs = allFacs.concat(FACILITIES_BY_DISTRICT[d] || [])
-      const dbFacs = await prisma.facility.findMany({ where: { province }, select: { name: true } })
-      allFacs = [...new Set([...allFacs, ...dbFacs.map((f: { name: string }) => f.name)])]
-      if (allFacs.length) where.facility = { in: allFacs }
+      const provRecord = await prisma.province.findFirst({ where: { name: province } })
+      if (provRecord) {
+        const dists = await prisma.district.findMany({ where: { province_id: provRecord.id }, select: { id: true } })
+        const distIds = dists.map((d: { id: number }) => d.id)
+        const units = await prisma.orgUnit.findMany({ where: { district_id: { in: distIds } }, select: { name: true } })
+        const names = units.map((u: { name: string }) => u.name)
+        if (names.length) where.facility = { in: names }
+      }
     }
 
     if (date) {
@@ -560,19 +597,24 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
     // ── Attendance filter ───────────────────────────────────────────────────
     const where: any = { timestamp: { gte: start, lte: end }, action: 'login' }
     if (user_id)  where.user_id  = user_id
-    if (facility) where.facility = facility
-    else if (district) {
-      const hardcoded = FACILITIES_BY_DISTRICT[district] || []
-      const dbFacs = await prisma.facility.findMany({ where: { district }, select: { name: true } })
-      const all = [...new Set([...hardcoded, ...dbFacs.map((f: { name: string }) => f.name)])]
-      if (all.length) where.facility = { in: all }
+    if (facility) {
+      where.facility = facility
+    } else if (district) {
+      const distRecord = await prisma.district.findFirst({ where: { name: district } })
+      if (distRecord) {
+        const units = await prisma.orgUnit.findMany({ where: { district_id: distRecord.id }, select: { name: true } })
+        const names = units.map((u: { name: string }) => u.name)
+        if (names.length) where.facility = { in: names }
+      }
     } else if (province) {
-      const dists = DISTRICTS[province] || []
-      let allFacs: string[] = []
-      for (const d of dists) allFacs = allFacs.concat(FACILITIES_BY_DISTRICT[d] || [])
-      const dbFacs = await prisma.facility.findMany({ where: { province }, select: { name: true } })
-      allFacs = [...new Set([...allFacs, ...dbFacs.map((f: { name: string }) => f.name)])]
-      if (allFacs.length) where.facility = { in: allFacs }
+      const provRecord = await prisma.province.findFirst({ where: { name: province } })
+      if (provRecord) {
+        const dists = await prisma.district.findMany({ where: { province_id: provRecord.id }, select: { id: true } })
+        const distIds = dists.map((d: { id: number }) => d.id)
+        const units = await prisma.orgUnit.findMany({ where: { district_id: { in: distIds } }, select: { name: true } })
+        const names = units.map((u: { name: string }) => u.name)
+        if (names.length) where.facility = { in: names }
+      }
     }
 
     const config = await prisma.shiftConfig.findUnique({ where: { config_id: 'default' } })

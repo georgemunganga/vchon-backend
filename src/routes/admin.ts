@@ -283,6 +283,139 @@ export default async function adminRoutes(fastify: FastifyInstance) {
     return reply.send({ message: 'All notifications marked as read' })
   })
 
+  // GET /api/admin/stats — scoped overview stats for admin dashboard
+  fastify.get('/admin/stats', { preHandler: requireAdmin }, async (request, reply) => {
+    const user = (request as any).user
+    const scopeWhere = await getAdminScopeWhere(user)
+    const today = new Date(); today.setHours(0, 0, 0, 0)
+
+    // Users currently on duty (scoped)
+    const onDutyRaw = await prisma.attendance.findMany({
+      where: { ...scopeWhere, action: 'login', timestamp: { gte: today } },
+      select: { user_id: true, timestamp: true },
+    })
+    // Filter to those without a logout after their login
+    const onDutyUserIds = new Set<string>()
+    for (const r of onDutyRaw) {
+      const hasLogout = await prisma.attendance.findFirst({
+        where: { user_id: r.user_id, action: 'logout', timestamp: { gt: r.timestamp } },
+      })
+      if (!hasLogout) onDutyUserIds.add(r.user_id)
+    }
+
+    // Today's logins for late/on-time/early breakdown
+    const todayLogins = await prisma.attendance.findMany({
+      where: { ...scopeWhere, action: 'login', timestamp: { gte: today } },
+      select: { timestamp: true, shift_type: true },
+    })
+    const config = await prisma.shiftConfig.findUnique({ where: { config_id: 'default' } })
+    let todayLate = 0, todayOnTime = 0, todayEarly = 0
+    for (const r of todayLogins) {
+      if (!config || !r.shift_type) { todayOnTime++; continue }
+      const shiftStartStr = (config as any)[`${r.shift_type}_start`]
+      if (!shiftStartStr) { todayOnTime++; continue }
+      const shiftStartMins = parseTimeToMinutes(shiftStartStr)
+      const grace = config.grace_period_minutes || 15
+      const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
+      const recordSecs = r.timestamp.getHours() * 3600 + r.timestamp.getMinutes() * 60 + r.timestamp.getSeconds()
+      const shiftStartSecs = shiftStartMins * 60
+      const graceSecs = grace * 60
+      if (recordMins < shiftStartMins) todayEarly++
+      else if (recordSecs <= shiftStartSecs + graceSecs) todayOnTime++
+      else todayLate++
+    }
+
+    const [totalUsers, todayAttendance, totalAttendance] = await Promise.all([
+      prisma.user.count({ where: { role: 'user' } }),
+      prisma.attendance.count({ where: { ...scopeWhere, timestamp: { gte: today } } }),
+      prisma.attendance.count({ where: scopeWhere }),
+    ])
+
+    return reply.send({
+      total_users: totalUsers,
+      today_logins: todayAttendance,
+      currently_on_duty: onDutyUserIds.size,
+      today_attendance: todayAttendance,
+      total_attendance: totalAttendance,
+      today_late: todayLate,
+      today_on_time: todayOnTime,
+      today_early: todayEarly,
+    })
+  })
+
+  // GET /api/admin/attendance-report — scoped attendance report for admin
+  fastify.get('/admin/attendance-report', { preHandler: requireAdmin }, async (request, reply) => {
+    const user = (request as any).user
+    const scopeWhere = await getAdminScopeWhere(user)
+    const query = request.query as any
+    const { facility, date, page = '1', limit = '100' } = query
+
+    const where: any = { ...scopeWhere }
+    if (facility) where.facility = facility
+    if (date) {
+      const start = new Date(date); start.setHours(0, 0, 0, 0)
+      const end = new Date(date); end.setHours(23, 59, 59, 999)
+      where.timestamp = { gte: start, lte: end }
+    }
+
+    const config = await prisma.shiftConfig.findUnique({ where: { config_id: 'default' } })
+    const skip = (parseInt(page) - 1) * parseInt(limit)
+    const [records, total] = await Promise.all([
+      prisma.attendance.findMany({ where, skip, take: parseInt(limit), orderBy: { timestamp: 'desc' } }),
+      prisma.attendance.count({ where }),
+    ])
+
+    const enriched = records.map((r) => {
+      let lateDisplay: string | null = null
+      let earlyDisplay: string | null = null
+      let status: 'on_time' | 'late' | 'early' | null = null
+
+      if (config && r.shift_type) {
+        const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
+        const recordSecs = r.timestamp.getHours() * 3600 + r.timestamp.getMinutes() * 60 + r.timestamp.getSeconds()
+        if (r.action === 'login') {
+          const shiftStartStr = (config as any)[`${r.shift_type}_start`]
+          if (shiftStartStr) {
+            const shiftStartMins = parseTimeToMinutes(shiftStartStr)
+            const grace = config.grace_period_minutes || 15
+            const shiftStartSecs = shiftStartMins * 60
+            const graceSecs = grace * 60
+            if (recordMins < shiftStartMins) { status = 'early' }
+            else if (recordSecs <= shiftStartSecs + graceSecs) { status = 'on_time' }
+            else { status = 'late'; lateDisplay = formatLateDisplay(Math.floor((recordSecs - shiftStartSecs - graceSecs) / 60)) }
+          }
+        }
+        if (r.action === 'logout') {
+          const shiftEndStr = (config as any)[`${r.shift_type}_end`]
+          if (shiftEndStr) {
+            const shiftEndMins = parseTimeToMinutes(shiftEndStr)
+            const earlyMins = shiftEndMins - recordMins
+            if (earlyMins > 0) earlyDisplay = formatLateDisplay(earlyMins)
+          }
+        }
+      }
+
+      return {
+        attendance_id: r.attendance_id,
+        user_id: r.user_id,
+        user_name: r.user_name,
+        position: r.position,
+        facility: r.facility,
+        area_of_allocation: r.area_of_allocation,
+        action: r.action,
+        timestamp: r.timestamp.toISOString(),
+        shift_type: r.shift_type,
+        latitude: r.latitude,
+        longitude: r.longitude,
+        status,
+        late_display: lateDisplay,
+        early_display: earlyDisplay,
+      }
+    })
+
+    return reply.send({ attendance: enriched, total, page: parseInt(page), limit: parseInt(limit) })
+  })
+
   // GET /api/admin/shifts
   fastify.get('/admin/shifts', { preHandler: requireAdmin }, async (_req, reply) => {
     let config = await prisma.shiftConfig.findUnique({ where: { config_id: 'default' } })
