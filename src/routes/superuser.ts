@@ -39,26 +39,48 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
         )
     `
 
+    const config = await prisma.shiftConfig.findUnique({ where: { config_id: 'default' } })
+
+    // Helper: classify a login record
+    function classifyLogin(ts: Date, shiftType: string | null): 'early' | 'on_time' | 'late' {
+      if (!config || !shiftType) return 'on_time'
+      const shiftStartStr = (config as any)[`${shiftType}_start`]
+      if (!shiftStartStr) return 'on_time'
+      const shiftStartMins = parseTimeToMinutes(shiftStartStr)
+      const grace = config.grace_period_minutes || 15
+      const recordMins = ts.getHours() * 60 + ts.getMinutes()
+      const recordSecs = ts.getHours() * 3600 + ts.getMinutes() * 60 + ts.getSeconds()
+      const shiftStartSecs = shiftStartMins * 60
+      const graceSecs = grace * 60
+      if (recordMins < shiftStartMins) return 'early'
+      if (recordSecs <= shiftStartSecs + graceSecs) return 'on_time'
+      return 'late'
+    }
+
     // Today's login records for late/on-time/early breakdown
     const todayLogins = await prisma.attendance.findMany({
       where: { action: 'login', timestamp: { gte: today } },
       select: { timestamp: true, shift_type: true },
     })
-    const config = await prisma.shiftConfig.findUnique({ where: { config_id: 'default' } })
     let todayLate = 0, todayOnTime = 0, todayEarly = 0
     for (const r of todayLogins) {
-      if (!config || !r.shift_type) { todayOnTime++; continue }
-      const shiftStartStr = (config as any)[`${r.shift_type}_start`]
-      if (!shiftStartStr) { todayOnTime++; continue }
-      const shiftStartMins = parseTimeToMinutes(shiftStartStr)
-      const grace = config.grace_period_minutes || 15
-      const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
-      const recordSecs = r.timestamp.getHours() * 3600 + r.timestamp.getMinutes() * 60 + r.timestamp.getSeconds()
-      const shiftStartSecs = shiftStartMins * 60
-      const graceSecs = grace * 60
-      if (recordMins < shiftStartMins) todayEarly++
-      else if (recordSecs <= shiftStartSecs + graceSecs) todayOnTime++
-      else todayLate++
+      const c = classifyLogin(r.timestamp, r.shift_type)
+      if (c === 'late') todayLate++
+      else if (c === 'early') todayEarly++
+      else todayOnTime++
+    }
+
+    // All-time login records for overall late/on-time/early totals
+    const allLogins = await prisma.attendance.findMany({
+      where: { action: 'login' },
+      select: { timestamp: true, shift_type: true },
+    })
+    let allLate = 0, allOnTime = 0, allEarly = 0
+    for (const r of allLogins) {
+      const c = classifyLogin(r.timestamp, r.shift_type)
+      if (c === 'late') allLate++
+      else if (c === 'early') allEarly++
+      else allOnTime++
     }
 
     const [totalUsers, totalAdmins, totalSuperusers, totalFacilities, todayAttendance, totalAttendance] = await Promise.all([
@@ -82,6 +104,9 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
       today_late: todayLate,
       today_on_time: todayOnTime,
       today_early: todayEarly,
+      all_late: allLate,
+      all_on_time: allOnTime,
+      all_early: allEarly,
     })
   })
 
@@ -340,25 +365,43 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
     const enriched = records.map((r) => {
       let lateDisplay: string | null = null
       let earlyDisplay: string | null = null
+      let status: 'on_time' | 'late' | 'early' | 'logout' | null = null
 
-      if (config && r.shift_type && r.action === 'login') {
-        const shiftStartStr = (config as any)[`${r.shift_type}_start`]
-        if (shiftStartStr) {
-          const shiftStartMins = parseTimeToMinutes(shiftStartStr)
-          const grace = config.grace_period_minutes || 15
-          const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
-          const lateMins = recordMins - (shiftStartMins + grace)
-          if (lateMins > 0) lateDisplay = formatLateDisplay(lateMins)
+      if (r.action === 'login') {
+        if (config && r.shift_type) {
+          const shiftStartStr = (config as any)[`${r.shift_type}_start`]
+          if (shiftStartStr) {
+            const shiftStartMins = parseTimeToMinutes(shiftStartStr)
+            const grace = config.grace_period_minutes || 15
+            const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
+            const recordSecs = r.timestamp.getHours() * 3600 + r.timestamp.getMinutes() * 60 + r.timestamp.getSeconds()
+            const shiftStartSecs = shiftStartMins * 60
+            const graceSecs = grace * 60
+            if (recordMins < shiftStartMins) {
+              status = 'early'
+            } else if (recordSecs <= shiftStartSecs + graceSecs) {
+              status = 'on_time'
+            } else {
+              status = 'late'
+              const lateMins = Math.floor((recordSecs - shiftStartSecs - graceSecs) / 60)
+              lateDisplay = formatLateDisplay(lateMins)
+            }
+          } else {
+            status = 'on_time'
+          }
+        } else {
+          status = 'on_time'
         }
-      }
-
-      if (config && r.shift_type && r.action === 'logout') {
-        const shiftEndStr = (config as any)[`${r.shift_type}_end`]
-        if (shiftEndStr) {
-          const shiftEndMins = parseTimeToMinutes(shiftEndStr)
-          const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
-          const earlyMins = shiftEndMins - recordMins
-          if (earlyMins > 0) earlyDisplay = formatLateDisplay(earlyMins)
+      } else if (r.action === 'logout') {
+        status = 'logout'
+        if (config && r.shift_type) {
+          const shiftEndStr = (config as any)[`${r.shift_type}_end`]
+          if (shiftEndStr) {
+            const shiftEndMins = parseTimeToMinutes(shiftEndStr)
+            const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
+            const earlyMins = shiftEndMins - recordMins
+            if (earlyMins > 0) earlyDisplay = formatLateDisplay(earlyMins)
+          }
         }
       }
 
@@ -374,12 +417,13 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
         shift_type: r.shift_type,
         latitude: r.latitude,
         longitude: r.longitude,
+        status,
         late_display: lateDisplay,
         early_display: earlyDisplay,
       }
     })
 
-    return reply.send({ attendance: enriched, total, page: parseInt(page), limit: parseInt(limit) })
+    return reply.send({ records: enriched, total, page: parseInt(page), limit: parseInt(limit) })
   })
 
   // GET /api/superuser/export  (Excel with color coding)

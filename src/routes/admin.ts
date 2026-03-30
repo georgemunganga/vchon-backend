@@ -26,6 +26,7 @@ function parseTimeToMinutes(t: string): number {
 
 export default async function adminRoutes(fastify: FastifyInstance) {
   // GET /api/admin/attendance/realtime
+  // Returns on_duty_count, on_duty_staff[], facility_breakdown{} — same shape as AdminDashboard expects
   fastify.get('/admin/attendance/realtime', { preHandler: requireAdmin }, async (request, reply) => {
     const user = (request as any).user
     const scopeWhere = await getAdminScopeWhere(user)
@@ -33,24 +34,84 @@ export default async function adminRoutes(fastify: FastifyInstance) {
     const today = new Date()
     today.setHours(0, 0, 0, 0)
 
-    const records = await prisma.attendance.findMany({
-      where: { ...scopeWhere, timestamp: { gte: today } },
+    // All login records today (scoped)
+    const todayLogins = await prisma.attendance.findMany({
+      where: { ...scopeWhere, action: 'login', timestamp: { gte: today } },
       orderBy: { timestamp: 'desc' },
-      take: 200,
     })
 
     const config = await prisma.shiftConfig.findUnique({ where: { config_id: 'default' } })
 
+    // Determine who is currently on duty: logged in today with no subsequent logout
+    const onDutyStaff: any[] = []
+    for (const r of todayLogins) {
+      const hasLogout = await prisma.attendance.findFirst({
+        where: { user_id: r.user_id, action: 'logout', timestamp: { gt: r.timestamp } },
+      })
+      if (hasLogout) continue
+
+      // Classify lateness
+      let lateSeconds: number | null = null
+      let status: 'on_time' | 'late' | 'early' | null = null
+      let lateDisplay: string | null = null
+
+      if (config && r.shift_type) {
+        const shiftStartStr = (config as any)[`${r.shift_type}_start`]
+        if (shiftStartStr) {
+          const shiftStartMins = parseTimeToMinutes(shiftStartStr)
+          const grace = config.grace_period_minutes || 15
+          const recordSecs = r.timestamp.getHours() * 3600 + r.timestamp.getMinutes() * 60 + r.timestamp.getSeconds()
+          const shiftStartSecs = shiftStartMins * 60
+          const graceSecs = grace * 60
+          const diffSecs = recordSecs - (shiftStartSecs + graceSecs)
+          if (diffSecs > 0) {
+            lateSeconds = diffSecs
+            status = 'late'
+            lateDisplay = formatDuration(diffSecs)
+          } else if (r.timestamp.getHours() * 60 + r.timestamp.getMinutes() < shiftStartMins) {
+            status = 'early'
+          } else {
+            status = 'on_time'
+          }
+        }
+      }
+
+      onDutyStaff.push({
+        attendance_id: r.attendance_id,
+        user_id: r.user_id,
+        user_name: r.user_name,
+        position: r.position,
+        facility: r.facility,
+        area_of_allocation: r.area_of_allocation,
+        action: r.action,
+        timestamp: r.timestamp.toISOString(),
+        shift_type: r.shift_type,
+        latitude: r.latitude,
+        longitude: r.longitude,
+        status,
+        late_display: lateDisplay,
+        late_seconds: lateSeconds,
+      })
+    }
+
+    // Build facility breakdown from on-duty staff
+    const facilityBreakdown: Record<string, number> = {}
+    for (const s of onDutyStaff) {
+      if (s.facility) facilityBreakdown[s.facility] = (facilityBreakdown[s.facility] || 0) + 1
+    }
+
     return reply.send({
-      attendance: records.map((r) => {
+      on_duty_count: onDutyStaff.length,
+      on_duty_staff: onDutyStaff,
+      facility_breakdown: facilityBreakdown,
+      // Also include today's full attendance log for the attendance tab
+      attendance: todayLogins.map((r) => {
         let lateSeconds: number | null = null
         let earlySeconds: number | null = null
         let status: 'on_time' | 'late' | 'early' | null = null
-
         if (config && r.shift_type) {
           const recordMins = r.timestamp.getHours() * 60 + r.timestamp.getMinutes()
           const recordSecs = r.timestamp.getHours() * 3600 + r.timestamp.getMinutes() * 60 + r.timestamp.getSeconds()
-
           if (r.action === 'login') {
             const shiftStartStr = (config as any)[`${r.shift_type}_start`]
             if (shiftStartStr) {
@@ -59,31 +120,22 @@ export default async function adminRoutes(fastify: FastifyInstance) {
               const shiftStartSecs = shiftStartMins * 60
               const graceSecs = grace * 60
               const diffSecs = recordSecs - (shiftStartSecs + graceSecs)
-              if (diffSecs > 0) {
-                lateSeconds = diffSecs
-                status = 'late'
-              } else {
-                status = 'on_time'
-              }
+              if (recordMins < shiftStartMins) { status = 'early' }
+              else if (diffSecs > 0) { lateSeconds = diffSecs; status = 'late' }
+              else { status = 'on_time' }
             }
           }
-
           if (r.action === 'logout') {
             const shiftEndStr = (config as any)[`${r.shift_type}_end`]
             if (shiftEndStr) {
               const shiftEndMins = parseTimeToMinutes(shiftEndStr)
               const shiftEndSecs = shiftEndMins * 60
               const diffSecs = shiftEndSecs - recordSecs
-              if (diffSecs > 0) {
-                earlySeconds = diffSecs
-                status = 'early'
-              } else {
-                status = 'on_time'
-              }
+              if (diffSecs > 0) { earlySeconds = diffSecs; status = 'early' }
+              else { status = 'on_time' }
             }
           }
         }
-
         return {
           attendance_id: r.attendance_id,
           user_id: r.user_id,
@@ -96,7 +148,6 @@ export default async function adminRoutes(fastify: FastifyInstance) {
           shift_type: r.shift_type,
           latitude: r.latitude,
           longitude: r.longitude,
-          // Lateness / earliness in hh:mm:ss
           late_display: lateSeconds !== null ? formatDuration(lateSeconds) : null,
           early_display: earlySeconds !== null ? formatDuration(earlySeconds) : null,
           status,
