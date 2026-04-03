@@ -279,6 +279,25 @@ model UserReport {
   @@index([created_at])
 }
 
+// ─── Shift Tasks ─────────────────────────────────────────────────────────────
+// Tasks submitted by staff at checkout to log what they accomplished during shift
+
+model ShiftTask {
+  id            Int      @id @default(autoincrement())
+  task_id       String   @unique @default(cuid())
+  attendance_id String   // References Attendance.attendance_id (the logout record)
+  user_id       String
+  user_name     String
+  facility      String
+  tasks         Json     // Array of { text: string, order: number }
+  submitted_at  DateTime @default(now())
+
+  @@index([attendance_id])
+  @@index([user_id])
+  @@index([facility])
+  @@index([submitted_at])
+}
+
 // ─── Audit Trail ─────────────────────────────────────────────────────────────
 
 model AuditLog {

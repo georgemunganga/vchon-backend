@@ -217,4 +217,91 @@ export default async function attendanceRoutes(fastify: FastifyInstance) {
       })),
     })
   })
+
+  // ─── Shift Tasks ──────────────────────────────────────────────────────────
+
+  // POST /api/attendance/tasks
+  // Staff submit their task list at checkout time
+  fastify.post('/attendance/tasks', { preHandler: authenticate }, async (request, reply) => {
+    const user = (request as any).user
+    const body = request.body as any
+    const { attendance_id, tasks } = body
+
+    if (!attendance_id || typeof attendance_id !== 'string') {
+      return reply.code(400).send({ detail: 'attendance_id is required' })
+    }
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+      return reply.code(400).send({ detail: 'At least one task is required' })
+    }
+    if (tasks.length > 20) {
+      return reply.code(400).send({ detail: 'Maximum 20 tasks allowed' })
+    }
+
+    // Validate each task is a non-empty string within 200 chars
+    const cleanTasks = tasks
+      .map((t: any) => (typeof t === 'string' ? t.trim() : ''))
+      .filter((t: string) => t.length > 0)
+      .slice(0, 20)
+
+    if (cleanTasks.length === 0) {
+      return reply.code(400).send({ detail: 'At least one non-empty task is required' })
+    }
+
+    // Verify the attendance record belongs to this user
+    const attRecord = await prisma.attendance.findUnique({
+      where: { attendance_id },
+    })
+    if (!attRecord || attRecord.user_id !== user.user_id) {
+      return reply.code(404).send({ detail: 'Attendance record not found' })
+    }
+
+    // Upsert: if tasks already submitted for this attendance_id, update them
+    const existing = await prisma.shiftTask.findFirst({
+      where: { attendance_id },
+    })
+
+    const taskPayload = cleanTasks.map((text: string, i: number) => ({ text, order: i + 1 }))
+
+    if (existing) {
+      await prisma.shiftTask.update({
+        where: { task_id: existing.task_id },
+        data: { tasks: taskPayload, submitted_at: new Date() },
+      })
+      return reply.send({ task_id: existing.task_id, updated: true })
+    }
+
+    const record = await prisma.shiftTask.create({
+      data: {
+        attendance_id,
+        user_id: user.user_id,
+        user_name: user.name,
+        facility: user.facility || attRecord.facility,
+        tasks: taskPayload,
+      },
+    })
+
+    return reply.send({ task_id: record.task_id, submitted_at: record.submitted_at.toISOString() })
+  })
+
+  // GET /api/attendance/tasks/:attendanceId
+  // Staff can view their own tasks for a given attendance record
+  fastify.get('/attendance/tasks/:attendanceId', { preHandler: authenticate }, async (request, reply) => {
+    const user = (request as any).user
+    const { attendanceId } = request.params as any
+
+    const record = await prisma.shiftTask.findFirst({
+      where: { attendance_id: attendanceId, user_id: user.user_id },
+    })
+
+    if (!record) {
+      return reply.send({ tasks: [], has_tasks: false })
+    }
+
+    return reply.send({
+      task_id: record.task_id,
+      tasks: record.tasks,
+      submitted_at: record.submitted_at.toISOString(),
+      has_tasks: true,
+    })
+  })
 }

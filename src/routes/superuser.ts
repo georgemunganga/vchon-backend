@@ -997,4 +997,29 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
       ministries,
     })
   })
+
+  // ─── Shift Tasks ──────────────────────────────────────────────────────────
+
+  // GET /api/superuser/tasks/:attendanceId
+  // Superuser views tasks for any attendance record globally
+  fastify.get('/superuser/tasks/:attendanceId', { preHandler: requireSuperuser }, async (request, reply) => {
+    const { attendanceId } = request.params as any
+
+    const record = await prisma.shiftTask.findFirst({
+      where: { attendance_id: attendanceId },
+    })
+
+    if (!record) {
+      return reply.send({ tasks: [], has_tasks: false })
+    }
+
+    return reply.send({
+      task_id: record.task_id,
+      user_name: record.user_name,
+      facility: record.facility,
+      tasks: record.tasks,
+      submitted_at: record.submitted_at.toISOString(),
+      has_tasks: true,
+    })
+  })
 }

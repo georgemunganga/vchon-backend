@@ -589,4 +589,29 @@ export default async function adminRoutes(fastify: FastifyInstance) {
       return reply.code(500).send({ detail: `Failed to send email: ${err.message}` })
     }
   })
+
+  // ─── Shift Tasks ──────────────────────────────────────────────────────────
+
+  // GET /api/admin/tasks/:attendanceId
+  // Admin views tasks for any attendance record within their scope
+  fastify.get('/admin/tasks/:attendanceId', { preHandler: requireAdmin }, async (request, reply) => {
+    const { attendanceId } = request.params as any
+
+    const record = await prisma.shiftTask.findFirst({
+      where: { attendance_id: attendanceId },
+    })
+
+    if (!record) {
+      return reply.send({ tasks: [], has_tasks: false })
+    }
+
+    return reply.send({
+      task_id: record.task_id,
+      user_name: record.user_name,
+      facility: record.facility,
+      tasks: record.tasks,
+      submitted_at: record.submitted_at.toISOString(),
+      has_tasks: true,
+    })
+  })
 }
