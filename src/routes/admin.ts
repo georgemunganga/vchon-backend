@@ -100,10 +100,24 @@ export default async function adminRoutes(fastify: FastifyInstance) {
       if (s.facility) facilityBreakdown[s.facility] = (facilityBreakdown[s.facility] || 0) + 1
     }
 
+    // Build location type breakdown (Facility / Outreach / Workshop or Meeting)
+    const LOCATION_TYPES = ['Facility', 'Outreach', 'Workshop or Meeting']
+    const locationBreakdown: Record<string, { count: number; staff: any[] }> = {}
+    for (const lt of LOCATION_TYPES) {
+      locationBreakdown[lt] = { count: 0, staff: [] }
+    }
+    for (const s of onDutyStaff) {
+      const lt = s.area_of_allocation || 'Facility'
+      if (!locationBreakdown[lt]) locationBreakdown[lt] = { count: 0, staff: [] }
+      locationBreakdown[lt].count++
+      locationBreakdown[lt].staff.push(s)
+    }
+
     return reply.send({
       on_duty_count: onDutyStaff.length,
       on_duty_staff: onDutyStaff,
       facility_breakdown: facilityBreakdown,
+      location_breakdown: locationBreakdown,
       // Also include today's full attendance log for the attendance tab
       attendance: todayLogins.map((r) => {
         let lateSeconds: number | null = null

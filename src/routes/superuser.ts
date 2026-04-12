@@ -92,6 +92,41 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
       prisma.attendance.count(),
     ])
 
+    // Fetch full details for on-duty staff to build location breakdown
+    const onDutyUserIds = onDutyRaw.map((r) => r.user_id)
+    const onDutyDetails = onDutyUserIds.length > 0
+      ? await prisma.attendance.findMany({
+          where: {
+            user_id: { in: onDutyUserIds },
+            action: 'login',
+            timestamp: { gte: today },
+          },
+          orderBy: { timestamp: 'desc' },
+          distinct: ['user_id'],
+        })
+      : []
+
+    const LOCATION_TYPES = ['Facility', 'Outreach', 'Workshop or Meeting']
+    const locationBreakdown: Record<string, { count: number; staff: any[] }> = {}
+    for (const lt of LOCATION_TYPES) {
+      locationBreakdown[lt] = { count: 0, staff: [] }
+    }
+    for (const r of onDutyDetails) {
+      const lt = r.area_of_allocation || 'Facility'
+      if (!locationBreakdown[lt]) locationBreakdown[lt] = { count: 0, staff: [] }
+      locationBreakdown[lt].count++
+      locationBreakdown[lt].staff.push({
+        user_id: r.user_id,
+        user_name: r.user_name,
+        position: r.position,
+        facility: r.facility,
+        area_of_allocation: r.area_of_allocation,
+        timestamp: r.timestamp.toISOString(),
+        shift_type: r.shift_type,
+        status: classifyLogin(r.timestamp, r.shift_type),
+      })
+    }
+
     return reply.send({
       total_users: totalUsers,
       total_admins: totalAdmins,
@@ -107,6 +142,7 @@ export default async function superuserRoutes(fastify: FastifyInstance) {
       all_late: allLate,
       all_on_time: allOnTime,
       all_early: allEarly,
+      location_breakdown: locationBreakdown,
     })
   })
 
