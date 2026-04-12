@@ -99,7 +99,7 @@ export default async function dataRoutes(fastify: FastifyInstance) {
 
   // ─── Areas of allocation — both /areas and /data/areas work ────────────────────
   const areasHandler = async (_req: any, reply: any) => {
-    return reply.send({ areas: ['Facility', 'Outreach'] })
+    return reply.send({ areas: ['Facility', 'Outreach', 'Workshop or Meeting'] })
   }
   fastify.get('/areas', areasHandler)
   fastify.get('/data/areas', areasHandler)
