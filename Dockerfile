@@ -3,7 +3,8 @@
 # ─────────────────────────────────────────────
 FROM node:22-alpine AS builder
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Pin pnpm to avoid slow @latest resolution on every build
+RUN corepack enable && corepack prepare pnpm@10.6.5 --activate
 RUN apk add --no-cache openssl qpdf
 
 WORKDIR /app
@@ -24,21 +25,20 @@ RUN pnpm build
 # ─────────────────────────────────────────────
 FROM node:22-alpine AS runner
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@10.6.5 --activate
 RUN apk add --no-cache openssl curl qpdf
 
 WORKDIR /app
 
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+# Copy the full node_modules from builder — avoids a second pnpm install
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
 
-# Copy prisma schema + all migration files
+# Copy prisma schema + all migration files (needed for migrate deploy at startup)
 COPY prisma ./prisma/
 
-# Install production deps (prisma CLI is in dependencies, so it is included)
-RUN pnpm install --frozen-lockfile --prod
-
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules/.pnpm ./node_modules/.pnpm
+# Copy package files (needed by prisma CLI)
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 
 EXPOSE 8000
 
