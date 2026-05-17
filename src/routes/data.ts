@@ -22,7 +22,72 @@ import { FastifyInstance } from 'fastify'
 import prisma from '../lib/prisma'
 
 export default async function dataRoutes(fastify: FastifyInstance) {
+  const provincesHandler = async (_req: any, reply: any) => {
+    const provinces = await prisma.province.findMany({
+      orderBy: { name: 'asc' },
+      select: { id: true, name: true },
+    })
+    return reply.send({ provinces })
+  }
 
+  const positionsHandler = async (request: any, reply: any) => {
+    const { ministry_id } = request.query as { ministry_id?: string }
+    const where: any = ministry_id
+      ? { OR: [{ ministry_id: parseInt(ministry_id) }, { ministry_id: null }] }
+      : {}
+    const positions = await prisma.position.findMany({
+      where,
+      orderBy: { name: 'asc' },
+      select: { id: true, name: true, ministry_id: true },
+    })
+    return reply.send({ positions })
+  }
+
+  const areasHandler = async (_req: any, reply: any) => {
+    return reply.send({ areas: ['Facility', 'Outreach', 'Workshop or Meeting'] })
+  }
+
+  const facilitiesHandler = async (_req: any, reply: any) => {
+    const units = await prisma.orgUnit.findMany({
+      orderBy: { name: 'asc' },
+      select: { id: true, name: true },
+    })
+    return reply.send({ facilities: units.map((u) => u.name) })
+  }
+
+  const facilitiesByDistrictHandler = async (request: any, reply: any) => {
+    const { district } = request.params as { district: string }
+    const districtRecord = await prisma.district.findFirst({
+      where: { name: district },
+    })
+    if (!districtRecord) {
+      return reply.send({ district, facilities: [] })
+    }
+    const units = await prisma.orgUnit.findMany({
+      where: { district_id: districtRecord.id },
+      orderBy: { name: 'asc' },
+      select: { name: true },
+    })
+    return reply.send({ district, facilities: units.map((u) => u.name) })
+  }
+
+  const districtsByProvinceNameHandler = async (request: any, reply: any) => {
+    const { province } = request.params as { province: string }
+    const provinceRecord = await prisma.province.findUnique({
+      where: { name: province },
+    })
+    if (!provinceRecord) {
+      return reply.send({ province, districts: [] })
+    }
+    const districts = await prisma.district.findMany({
+      where: { province_id: provinceRecord.id },
+      orderBy: { name: 'asc' },
+      select: { name: true },
+    })
+    return reply.send({ province, districts: districts.map((d) => d.name) })
+  }
+
+	
   // ─── NEW: Ministries (active only — filtered server-side) ────────────────────────────────────────
   fastify.get('/data/ministries', async (_req, reply) => {
     const ministries = await prisma.ministry.findMany({
@@ -34,13 +99,8 @@ export default async function dataRoutes(fastify: FastifyInstance) {
   })
 
   // ─── NEW: Provinces (from DB) ─────────────────────────────────────────────────
-  fastify.get('/data/provinces', async (_req, reply) => {
-    const provinces = await prisma.province.findMany({
-      orderBy: { name: 'asc' },
-      select: { id: true, name: true },
-    })
-    return reply.send({ provinces })
-  })
+  fastify.get('/data/provinces', provincesHandler)
+  fastify.get('/provinces', provincesHandler)
 
   // ─── NEW: Districts by province_id ────────────────────────────────────────────
   fastify.get('/data/districts', async (request, reply) => {
@@ -84,66 +144,22 @@ export default async function dataRoutes(fastify: FastifyInstance) {
   })
 
   // ─── NEW: Positions (optionally filtered by ministry_id) ──────────────────────
-  fastify.get('/data/positions', async (request, reply) => {
-    const { ministry_id } = request.query as { ministry_id?: string }
-    const where: any = ministry_id
-      ? { OR: [{ ministry_id: parseInt(ministry_id) }, { ministry_id: null }] }
-      : {}
-    const positions = await prisma.position.findMany({
-      where,
-      orderBy: { name: 'asc' },
-      select: { id: true, name: true, ministry_id: true },
-    })
-    return reply.send({ positions })
-  })
+  fastify.get('/data/positions', positionsHandler)
+  fastify.get('/positions', positionsHandler)
 
   // ─── Areas of allocation — both /areas and /data/areas work ────────────────────
-  const areasHandler = async (_req: any, reply: any) => {
-    return reply.send({ areas: ['Facility', 'Outreach', 'Workshop or Meeting'] })
-  }
   fastify.get('/areas', areasHandler)
   fastify.get('/data/areas', areasHandler)
 
   // ─── LEGACY: /data/facilities (flat list from OrgUnits) ──────────────────────
-  fastify.get('/data/facilities', async (_req, reply) => {
-    const units = await prisma.orgUnit.findMany({
-      orderBy: { name: 'asc' },
-      select: { id: true, name: true },
-    })
-    return reply.send({ facilities: units.map((u) => u.name) })
-  })
+  fastify.get('/facilities', facilitiesHandler)
+  fastify.get('/data/facilities', facilitiesHandler)
 
   // ─── LEGACY: /data/facilities/:district (string-based) ───────────────────────
-  fastify.get('/data/facilities/:district', async (request, reply) => {
-    const { district } = request.params as { district: string }
-    const districtRecord = await prisma.district.findFirst({
-      where: { name: district },
-    })
-    if (!districtRecord) {
-      return reply.send({ district, facilities: [] })
-    }
-    const units = await prisma.orgUnit.findMany({
-      where: { district_id: districtRecord.id },
-      orderBy: { name: 'asc' },
-      select: { name: true },
-    })
-    return reply.send({ district, facilities: units.map((u) => u.name) })
-  })
+  fastify.get('/facilities/:district', facilitiesByDistrictHandler)
+  fastify.get('/data/facilities/:district', facilitiesByDistrictHandler)
 
   // ─── LEGACY: /data/districts/:province (string-based) ────────────────────────
-  fastify.get('/data/districts/:province', async (request, reply) => {
-    const { province } = request.params as { province: string }
-    const provinceRecord = await prisma.province.findUnique({
-      where: { name: province },
-    })
-    if (!provinceRecord) {
-      return reply.send({ province, districts: [] })
-    }
-    const districts = await prisma.district.findMany({
-      where: { province_id: provinceRecord.id },
-      orderBy: { name: 'asc' },
-      select: { name: true },
-    })
-    return reply.send({ province, districts: districts.map((d) => d.name) })
-  })
+  fastify.get('/districts/:province', districtsByProvinceNameHandler)
+  fastify.get('/data/districts/:province', districtsByProvinceNameHandler)
 }

@@ -277,10 +277,9 @@ async function main() {
     for (const facilityName of facilities) {
       await prisma.orgUnit.upsert({
         where: {
-          name_district_id_ministry_id: {
+          name_district_id: {
             name: facilityName,
             district_id: districtId,
-            ministry_id: healthMinistry.id,
           },
         },
         update: {},

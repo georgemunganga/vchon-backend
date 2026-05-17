@@ -15,7 +15,6 @@
  */
 
 import PDFDocument from 'pdfkit'
-import { encrypt } from 'node-qpdf2'
 import { writeFileSync, unlinkSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -277,6 +276,7 @@ async function encryptPdf(pdfBuffer: Buffer, password: string): Promise<Buffer> 
   const tmpIn = join(tmpdir(), `vcron-report-${randomBytes(8).toString('hex')}.pdf`)
   try {
     writeFileSync(tmpIn, pdfBuffer)
+    const { encrypt } = await import('node-qpdf2')
     const encryptedBuffer = await encrypt({
       input: tmpIn,
       password: { user: password, owner: `vcron-owner-${password}` },
